@@ -606,7 +606,15 @@ it.skipIf(process.platform === "win32")("materializes through a pre-existing tra
     await expect(lstat(join(skillDir, "desktop.ini"))).rejects.toThrow();
   });
 
-  it("degrades to a conflict when the purge cannot delete, never failing the sync", async () => {
+  // POSIX-only: the failure has to be INJECTED, and chmod is the only portable
+  // way to deny a directory write. Windows chmod maps just the read-only file
+  // attribute and does not stop deletion inside a directory, so the purge
+  // succeeds there, the skill updates, and the directory this test chmods back
+  // has already been renamed into the transaction backup (CI, windows-latest:
+  // ENOENT on the restore). The behaviour under test — rm throwing must not
+  // abort the sync — is platform-independent in the code; only the injection is
+  // not, and POSIX coverage exercises the identical try/catch.
+  it.skipIf(process.platform === "win32")("degrades to a conflict when the purge cannot delete, never failing the sync", async () => {
     // The purge runs inside materializeNative's try block, before any skill is
     // staged. An unreadable or read-only directory must not convert one skill's
     // junk file into a whole-sync abort that freezes EVERY other skill — that
@@ -655,7 +663,10 @@ it.skipIf(process.platform === "win32")("materializes through a pre-existing tra
       // The undeletable one degrades to the pre-fix behaviour: conflict.
       expect(result.conflicts).toContain("local-browser");
     } finally {
-      await chmod(scriptsDir, 0o700);
+      // Tolerate ENOENT: if the purge ever DOES succeed here the directory has
+      // been renamed into the transaction backup, and failing to restore a mode
+      // on a path that no longer exists must not mask the real assertion above.
+      await chmod(scriptsDir, 0o700).catch(() => undefined);
     }
   });
 
