@@ -9,7 +9,10 @@ import { fileURLToPath } from "node:url";
  * validates required ones, and exports them for use throughout the server.
  *
  * Environment variable guide:
- *   BRAVE_API_KEY          — (required) API key for Brave Search Pro. Get one at https://brave.com/search/api/
+ *   BRAVE_API_KEY          — (required for search) API key for Brave Search Pro, and the only
+ *                            thing search needs in fully-local operation. A configured Synalux
+ *                            account supplies it portal-side instead, so exactly one of the two
+ *                            is needed. Get one at https://brave.com/search/api/
  *   GOOGLE_API_KEY         — (optional) API key for Google AI Studio / Gemini. Enables paper analysis.
  *   BRAVE_ANSWERS_API_KEY  — (optional) API key for Brave Answers (AI grounding). Enables brave_answers tool.
  *   SUPABASE_URL           — (optional) Your Supabase project URL. Enables session memory tools.
@@ -19,9 +22,15 @@ import { fileURLToPath } from "node:url";
  *   VOYAGE_API_KEY         — (optional) Voyage AI API key for embeddings.
  *                            Set embedding_provider=voyage to use. https://dash.voyageai.com
  *
- * If a required key is missing, the process exits immediately.
- * If an optional key is missing, a warning is logged but the server continues
- * with reduced functionality (the corresponding tools will be unavailable).
+ * No key is enforced at startup. Nothing here calls process.exit, so a missing
+ * key never stops the server — it starts with reduced functionality and the
+ * affected tools error when they are actually called. Missing keys log a
+ * warning, except BRAVE_API_KEY, which warns only under PRISM_DEBUG_LOGGING.
+ *
+ * Said plainly because the old wording ("the process exits immediately") was
+ * describing behaviour no key has ever had, and read as a hard startup
+ * dependency on a Brave + Firecrawl pair — see issue #188, filed on exactly
+ * that premise.
  */
 
 // ─── Server Identity ──────────────────────────────────────────
