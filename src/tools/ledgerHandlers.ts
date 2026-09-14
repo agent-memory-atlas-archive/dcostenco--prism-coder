@@ -597,29 +597,31 @@ async function buildNativeSystemReadyBlock(
   const conflictSuffix = snapshot.conflicts.length > 0
     ? ` · ${snapshot.conflicts.length} conflict${snapshot.conflicts.length === 1 ? "" : "s"} — see warning`
     : "";
-  // Name the CONDITION, not one guessed cause. This used to read "local copy
-  // has no Prism ownership marker", which is only one of several ways a skill
-  // conflicts — and not the common one. On 2026-09-14 dead-link-prevention
+  // Name the CONDITION, then hand over the procedure that reveals the cause.
+  // This used to read "local copy has no Prism ownership marker", which is one
+  // of several causes and not the common one. On 2026-09-14 dead-link-prevention
   // tripped it with a marker that was present and digest-exact; the real cause
   // was one extra untracked file. The sentence sent the operator to quarantine
   // the directory and rerun `prism connect` (which rewrites host MCP config and
   // wants every host closed) when the fix was deleting a regenerable cache dir.
   // A wrong cause is worse than no cause: it buys a confident wrong repair.
+  //
+  // Deliberately a PROCEDURE, not an enumeration of causes. Listing all of them
+  // is both longer and weaker — a list still leaves the operator guessing, while
+  // the file-list-vs-marker diff names the offender outright. Length is not
+  // cosmetic here: this block renders in the HEAD, which capNativeStartupText
+  // keeps while cutting the tail, so every extra character evicts session
+  // context. An enumerated draft measured 858 chars — 21% of the whole 4,000
+  // quick budget, against 9% for the wrong-but-short original.
   const conflictWarning = snapshot.conflicts.length > 0
     ? `\n> - ⚠️ **SKILLS NOT UPDATING (on-disk copy differs from the managed one):** ` +
       `${formatBoundedSkillNames([...snapshot.conflicts].sort(), "blocked")}. ` +
-      `Each named skill is frozen at whatever version is on disk — updates are ` +
-      `withheld to protect local edits. Cause is one of: the directory was ` +
-      `edited; it holds a file the manifest never shipped; it is an unowned ` +
-      `copy carrying no Prism marker; a file or symlink sits where the skill ` +
-      `directory should be; or its name collides with a different-case ` +
-      `directory. To see which, compare the directory's file ` +
-      `list against the \`files\` keys in its \`.prism-managed.json\`. If the ` +
-      `only difference is an extra file you do not need, delete it — the next ` +
-      `sync adopts the skill again. Otherwise, to discard local changes and ` +
-      `resume updates: move the skill's directory out of the native skills ` +
-      `folder and rerun \`prism connect\` (or a session bootstrap) to ` +
-      `reinstall the managed copy.`
+      `Each is frozen at whatever version is on disk — updates are withheld to ` +
+      `protect local edits. To see why, compare the directory's file list with ` +
+      `the \`files\` keys in its \`.prism-managed.json\`. An extra file you do ` +
+      `not need? Delete it; the next sync adopts the skill again. A local edit ` +
+      `you want to discard? Move the directory out of the native skills folder ` +
+      `and rerun \`prism connect\` (or a session bootstrap).`
     : "";
   // Durable, not per-run: a later sync reports "unchanged" while the roots stay
   // frozen from an earlier failed materialization. This line is the difference

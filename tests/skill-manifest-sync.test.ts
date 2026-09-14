@@ -1318,6 +1318,46 @@ it.skipIf(process.platform === "win32")("materializes through a pre-existing tra
     }
   });
 
+  it("cleanly REMOVES an unentitled skill that only grew junk, never quarantining it", async () => {
+    // Second site of the same defect, found reviewing the __pycache__ fix.
+    // enforceNativeEntitlements uses the pristine check to choose between
+    // deleting a now-unentitled skill and QUARANTINING it as presumed local
+    // work. A .DS_Store or __pycache__ makes the clean case look hand-edited,
+    // so downgrades silently accrete quarantine litter that nobody ever reads
+    // and nothing ever collects. Entitlement is enforced either way — this is
+    // about not leaving junk directories behind forever.
+    //
+    // Runs the REAL applyManifest path on purpose: enforceNativeEntitlements is
+    // skipped entirely when applyManifest is mocked, which is why every other
+    // test in this file misses it.
+    const agentsSkillsDir = await root();
+    const quarantineBase = join(dirname(agentsSkillsDir), ".prism-skill-quarantine");
+    const paid = manifest("advanced", ["aba-precision-protocol", "paid-skill"]);
+    expect((await synchronizeSkillManifest({
+      agentsSkillsDir, claudeCodeSkillsDir: false, cursorSkillsDir: false, ...paidAuth,
+      fetchImpl: vi.fn(() => jsonResponse(paid)) as unknown as typeof fetch,
+    })).status).toBe("applied");
+
+    // Nobody edited it. A file browser looked at it.
+    await writeFile(join(agentsSkillsDir, "paid-skill", ".DS_Store"), Buffer.from([0x00, 0x00, 0x00, 0x01]));
+
+    const free = manifest("free", []);
+    await applyManagedSkillManifest({
+      generation: free.generation, tier: free.tier, routingVersion: free.routing_version,
+      skills: free.skills.map(({ name, content, digest }) => ({ name, content, digest })),
+    });
+    await synchronizeSkillManifest({
+      agentsSkillsDir, claudeCodeSkillsDir: false, cursorSkillsDir: false, ...paidAuth,
+      fetchImpl: vi.fn(async () => { throw new Error("portal offline after crash"); }) as unknown as typeof fetch,
+    });
+
+    // Gone from discovery either way — that part already worked.
+    await expect(lstat(join(agentsSkillsDir, "paid-skill"))).rejects.toThrow();
+    // ...and gone from disk, rather than parked in quarantine forever.
+    const quarantined = await readdir(quarantineBase).catch(() => [] as string[]);
+    expect(quarantined.filter((entry) => entry.startsWith("paid-skill"))).toEqual([]);
+  });
+
   it("creates an absent Cursor skill root before scanning committed entitlement recovery", async () => {
     const agentsSkillsDir = await root();
     const cursorSkillsDir = join(dirname(agentsSkillsDir), ".cursor", "skills");

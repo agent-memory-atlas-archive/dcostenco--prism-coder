@@ -397,6 +397,13 @@ function isDerivedArtifactFile(name: string): boolean {
  * follows a symlink out of the skill root.
  */
 async function purgeDerivedArtifacts(path: string): Promise<void> {
+  // Self-guarding, not caller-guarded. Three sites call this now and the
+  // symlink check is the only thing standing between a delete primitive and an
+  // arbitrary target, so it lives HERE — a fourth caller that forgets to lstat
+  // must not be able to reintroduce the escape.
+  let rootStat;
+  try { rootStat = await lstat(path); } catch { return; }
+  if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) return;
   const marker = await readJson<NativeMarker>(join(path, MARKER));
   if (!marker || marker.owner !== OWNER || !marker.files || typeof marker.files !== "object") return;
   const shipped = new Set(Object.keys(marker.files));
@@ -584,6 +591,12 @@ async function enforceNativeEntitlements(incomingNames: Iterable<string>, agents
     if (incoming.has(name)) continue;
     const target = join(agentsSkillsDir, name);
     if (!(await exists(target))) continue;
+    // Same reason as the materialize paths: junk nobody wrote must not make a
+    // clean skill look hand-edited. Here the misread is quieter but permanent —
+    // the skill leaves discovery either way, but a false "locally modified"
+    // parks it in quarantine forever instead of deleting it, and nothing ever
+    // collects that directory.
+    await purgeDerivedArtifacts(target);
     if (await isPristineMarkedSkill(target)) {
       await rm(target, { recursive: true, force: true });
       continue;
