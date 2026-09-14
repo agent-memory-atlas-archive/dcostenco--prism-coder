@@ -351,6 +351,95 @@ async function listFiles(root: string, current = root): Promise<string[]> {
   return files.sort();
 }
 
+/**
+ * Artifacts nobody authors. ADMISSION RULE for these lists — an entry must be
+ * (1) machine-generated as a side effect of USING or BROWSING the directory,
+ * (2) regenerated on demand at no cost, and (3) never shippable content. Any
+ * other untracked file is a local edit and must keep conflicting. Do not widen
+ * this into "ignore files we do not recognise".
+ */
+const DERIVED_ARTIFACT_DIRS = new Set(["__pycache__"]);
+/** Compared lowercased: Explorer writes both `Thumbs.db` and `thumbs.db`. */
+const DERIVED_ARTIFACT_FILES = new Set([".ds_store", "thumbs.db", "desktop.ini"]);
+const DERIVED_ARTIFACT_EXT = /\.py[co]$/;
+
+function isDerivedArtifactFile(name: string): boolean {
+  const lower = name.toLocaleLowerCase("en-US");
+  return DERIVED_ARTIFACT_FILES.has(lower) || DERIVED_ARTIFACT_EXT.test(lower);
+}
+
+/**
+ * Remove regenerable junk from a marker-owned skill directory.
+ *
+ * `isPristineMarkedSkill` compares the FULL recursive file list against the
+ * marker's key list, so ONE untracked file classifies the skill as a conflict —
+ * frozen, silently skipped by every later sync. Two ways that happens without
+ * anyone editing anything:
+ *
+ *   - CPython writes `__pycache__/<mod>.cpython-XX.pyc` beside any module it
+ *     IMPORTS (exec'ing a script does not). Observed 2026-09-14:
+ *     dead-link-prevention froze after something imported check_links.py.
+ *   - Finder drops `.DS_Store` into any directory a user OPENS, and Explorer
+ *     drops `Thumbs.db`/`desktop.ini`. Reproduced 2026-09-14: browsing a
+ *     managed skill folder is enough to stop it updating. Windows is a
+ *     supported host, so both families belong here.
+ *
+ * PURGE, never ignore. Exempting these from the integrity walk would turn a
+ * noisy false conflict into a code-execution hole: CPython loads a cached .pyc
+ * in preference to its source whenever the pyc header's recorded source mtime
+ * and size match the .py, and both of those fields live in the attacker-written
+ * pyc. An ignored .pyc is arbitrary bytecode that executes while sync still
+ * reports the skill pristine and keeps updating it. Deleting restores integrity
+ * instead — the next import regenerates the cache from the .py the marker
+ * actually verifies, and any OTHER untracked file still conflicts as before.
+ *
+ * Touches nothing Prism does not own, nothing the manifest shipped, and never
+ * follows a symlink out of the skill root.
+ */
+async function purgeDerivedArtifacts(path: string): Promise<void> {
+  // Self-guarding, not caller-guarded. Three sites call this now and the
+  // symlink check is the only thing standing between a delete primitive and an
+  // arbitrary target, so it lives HERE — a fourth caller that forgets to lstat
+  // must not be able to reintroduce the escape.
+  let rootStat;
+  try { rootStat = await lstat(path); } catch { return; }
+  if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) return;
+  const marker = await readJson<NativeMarker>(join(path, MARKER));
+  if (!marker || marker.owner !== OWNER || !marker.files || typeof marker.files !== "object") return;
+  const shipped = new Set(Object.keys(marker.files));
+  const shippedPaths = [...shipped];
+  // BEST EFFORT, always. This runs inside materializeNative's try block before
+  // anything is staged, so letting an EACCES escape would convert one skill's
+  // junk file into a `partial` sync that freezes EVERY other skill — trading a
+  // one-skill problem for the whole-root outage shape this file's header
+  // describes. A delete we cannot do just means the pristine check conflicts
+  // that one skill, exactly as it did before this function existed.
+  const discard = async (child: string, recursive: boolean): Promise<void> => {
+    try { await rm(child, { recursive, force: true }); } catch { /* leave it; it conflicts */ }
+  };
+  const walk = async (current: string): Promise<void> => {
+    let entries;
+    try { entries = await readdir(current, { withFileTypes: true }); } catch { return; }
+    for (const entry of entries) {
+      const child = join(current, entry.name);
+      const rel = relative(path, child).split(sep).join("/");
+      // Never follow a symlink out of the skill root; listFiles still rejects it.
+      if (entry.isSymbolicLink()) continue;
+      if (entry.isDirectory()) {
+        const shippedUnder = shippedPaths.some((file) => file === rel || file.startsWith(`${rel}/`));
+        if (DERIVED_ARTIFACT_DIRS.has(entry.name) && !shippedUnder) {
+          await discard(child, true);
+          continue;
+        }
+        await walk(child);
+      } else if (entry.isFile() && isDerivedArtifactFile(entry.name) && !shipped.has(rel)) {
+        await discard(child, false);
+      }
+    }
+  };
+  await walk(path);
+}
+
 async function isPristineMarkedSkill(path: string, generation?: string): Promise<boolean> {
   const marker = await readJson<NativeMarker>(join(path, MARKER));
   if (!marker || marker.owner !== OWNER || (generation && marker.generation !== generation) ||
@@ -502,6 +591,12 @@ async function enforceNativeEntitlements(incomingNames: Iterable<string>, agents
     if (incoming.has(name)) continue;
     const target = join(agentsSkillsDir, name);
     if (!(await exists(target))) continue;
+    // Same reason as the materialize paths: junk nobody wrote must not make a
+    // clean skill look hand-edited. Here the misread is quieter but permanent —
+    // the skill leaves discovery either way, but a false "locally modified"
+    // parks it in quarantine forever instead of deleting it, and nothing ever
+    // collects that directory.
+    await purgeDerivedArtifacts(target);
     if (await isPristineMarkedSkill(target)) {
       await rm(target, { recursive: true, force: true });
       continue;
@@ -709,6 +804,7 @@ async function materializeNative(
       const target = join(agentsSkillsDir, name);
       if (!(await exists(target))) continue;
       const stat = await lstat(target);
+      if (stat.isDirectory() && !stat.isSymbolicLink()) await purgeDerivedArtifacts(target);
       const pristine = stat.isDirectory() && !stat.isSymbolicLink() && await isPristineManagedSkill(target, true);
       if (!pristine) {
         // Preserve locally modified managed content, but quarantine it outside
@@ -757,6 +853,7 @@ async function materializeNative(
       }
       const stat = await lstat(target);
       const managedSkill = managedCandidates.has(skill.name);
+      if (stat.isDirectory() && !stat.isSymbolicLink()) await purgeDerivedArtifacts(target);
       if (!stat.isDirectory() || stat.isSymbolicLink() || !(await isPristineManagedSkill(target, managedSkill))) {
         conflicts.push(skill.name);
         if (managedSkill) finalManaged.add(skill.name);

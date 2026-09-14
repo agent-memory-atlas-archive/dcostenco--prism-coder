@@ -490,6 +490,285 @@ it.skipIf(process.platform === "win32")("materializes through a pre-existing tra
     expect(result.updated).toContain("local-browser");
   });
 
+  it("KEEPS UPDATING a skill whose .py grew a __pycache__, and deletes the cache", async () => {
+    // Regression, 2026-09-14: dead-link-prevention silently stopped receiving
+    // updates. Its marker was present and every recorded digest matched — the
+    // whole cause was one file nobody wrote by hand. CPython 3.14 had cached
+    // scripts/check_links.py into __pycache__/ when something imported it, and
+    // the integrity walk counts every file, so the skill read as non-pristine
+    // and every later sync skipped it. Any skill shipping a .py is exposed.
+    //
+    // Derived bytecode must be PURGED and the skill adopted again, not treated
+    // as a local edit worth preserving.
+    const fixture = await mkdtemp(join(tmpdir(), "prism-pycache-sync-"));
+    roots.push(fixture);
+    const agentsSkillsDir = join(fixture, ".agents", "skills");
+    const common = {
+      agentsSkillsDir,
+      claudeCodeSkillsDir: join(fixture, ".claude", "skills"),
+      cursorSkillsDir: join(fixture, ".cursor", "skills"),
+      applyManifest: vi.fn(async () => undefined), ...paidAuth,
+    };
+
+    const script = "def check():\n    return True\n";
+    const first = manifest("standard", ["local-browser"]);
+    const v1 = first.skills.find((item) => item.name === "local-browser")!;
+    v1.files["scripts/check_links.py"] = {
+      content: script, digest: digest(script), encoding: "utf8",
+    };
+    first.generation = computeSkillManifestGeneration(first);
+    const installed = await synchronizeSkillManifest({
+      ...common,
+      fetchImpl: vi.fn(() => jsonResponse(first)) as unknown as typeof fetch,
+    });
+    expect(installed.installed).toContain("local-browser");
+
+    // Python imports the script. Nobody edited the skill.
+    const cache = join(agentsSkillsDir, "local-browser", "scripts", "__pycache__");
+    await mkdir(cache, { recursive: true });
+    await writeFile(join(cache, "check_links.cpython-314.pyc"), Buffer.from([0xcb, 0x0d, 0x0d, 0x0a]));
+
+    const second = manifest("standard", ["local-browser"]);
+    const v2 = second.skills.find((item) => item.name === "local-browser")!;
+    const serverContent = "---\nname: local-browser\n---\n# SERVER VERSION 2\n";
+    v2.files["SKILL.md"] = {
+      content: serverContent, digest: digest(serverContent), encoding: "utf8",
+    };
+    v2.files["scripts/check_links.py"] = {
+      content: script, digest: digest(script), encoding: "utf8",
+    };
+    v2.content = serverContent;
+    v2.digest = digest(serverContent);
+    second.generation = computeSkillManifestGeneration(second);
+
+    const result = await synchronizeSkillManifest({
+      ...common,
+      fetchImpl: vi.fn(() => jsonResponse(second)) as unknown as typeof fetch,
+    });
+
+    // Before the fix both of these fail: the skill conflicts and stays on v1.
+    expect(result.conflicts).not.toContain("local-browser");
+    expect(result.updated).toContain("local-browser");
+    expect(await readFile(join(agentsSkillsDir, "local-browser", "SKILL.md"), "utf8"))
+      .toBe(serverContent);
+    // Purged, not merely tolerated — see the next test for why that matters.
+    await expect(lstat(cache)).rejects.toThrow();
+  });
+
+  it("KEEPS UPDATING a skill a file browser dropped .DS_Store into", async () => {
+    // Found by adversarial review of the __pycache__ fix, then reproduced on the
+    // real ~/.agents tree: the first fix was incomplete. Finder writes .DS_Store
+    // into any directory a user merely OPENS, Explorer writes Thumbs.db and
+    // desktop.ini, and each lands exactly the same blow — one untracked file,
+    // skill frozen. Browsing your own skills folder should not stop it updating.
+    const fixture = await mkdtemp(join(tmpdir(), "prism-dsstore-sync-"));
+    roots.push(fixture);
+    const agentsSkillsDir = join(fixture, ".agents", "skills");
+    const common = {
+      agentsSkillsDir,
+      claudeCodeSkillsDir: join(fixture, ".claude", "skills"),
+      cursorSkillsDir: join(fixture, ".cursor", "skills"),
+      applyManifest: vi.fn(async () => undefined), ...paidAuth,
+    };
+
+    const first = manifest("standard", ["local-browser"]);
+    await synchronizeSkillManifest({
+      ...common,
+      fetchImpl: vi.fn(() => jsonResponse(first)) as unknown as typeof fetch,
+    });
+
+    // Every platform's file browser, including the case Explorer actually uses.
+    const skillDir = join(agentsSkillsDir, "local-browser");
+    await writeFile(join(skillDir, ".DS_Store"), Buffer.from([0x00, 0x00, 0x00, 0x01]));
+    await writeFile(join(skillDir, "Thumbs.db"), Buffer.from([0xd0, 0xcf, 0x11, 0xe0]));
+    await writeFile(join(skillDir, "desktop.ini"), "[.ShellClassInfo]\n");
+
+    const second = manifest("standard", ["local-browser"]);
+    const v2 = second.skills.find((item) => item.name === "local-browser")!;
+    const serverContent = "---\nname: local-browser\n---\n# SERVER VERSION 2\n";
+    v2.files["SKILL.md"] = {
+      content: serverContent, digest: digest(serverContent), encoding: "utf8",
+    };
+    v2.content = serverContent;
+    v2.digest = digest(serverContent);
+    second.generation = computeSkillManifestGeneration(second);
+
+    const result = await synchronizeSkillManifest({
+      ...common,
+      fetchImpl: vi.fn(() => jsonResponse(second)) as unknown as typeof fetch,
+    });
+
+    expect(result.conflicts).not.toContain("local-browser");
+    expect(result.updated).toContain("local-browser");
+    expect(await readFile(join(skillDir, "SKILL.md"), "utf8")).toBe(serverContent);
+    await expect(lstat(join(skillDir, ".DS_Store"))).rejects.toThrow();
+    await expect(lstat(join(skillDir, "Thumbs.db"))).rejects.toThrow();
+    await expect(lstat(join(skillDir, "desktop.ini"))).rejects.toThrow();
+  });
+
+  // POSIX-only: the failure has to be INJECTED, and chmod is the only portable
+  // way to deny a directory write. Windows chmod maps just the read-only file
+  // attribute and does not stop deletion inside a directory, so the purge
+  // succeeds there, the skill updates, and the directory this test chmods back
+  // has already been renamed into the transaction backup (CI, windows-latest:
+  // ENOENT on the restore). The behaviour under test — rm throwing must not
+  // abort the sync — is platform-independent in the code; only the injection is
+  // not, and POSIX coverage exercises the identical try/catch.
+  it.skipIf(process.platform === "win32")("degrades to a conflict when the purge cannot delete, never failing the sync", async () => {
+    // The purge runs inside materializeNative's try block, before any skill is
+    // staged. An unreadable or read-only directory must not convert one skill's
+    // junk file into a whole-sync abort that freezes EVERY other skill — that
+    // trades a one-skill problem for the nine-day outage shape this file's own
+    // header describes. Purge is best effort; failing to delete just means the
+    // pristine check conflicts that one skill, exactly as it did before.
+    const fixture = await mkdtemp(join(tmpdir(), "prism-purge-eacces-"));
+    roots.push(fixture);
+    const agentsSkillsDir = join(fixture, ".agents", "skills");
+    const common = {
+      agentsSkillsDir,
+      claudeCodeSkillsDir: join(fixture, ".claude", "skills"),
+      cursorSkillsDir: join(fixture, ".cursor", "skills"),
+      applyManifest: vi.fn(async () => undefined), ...paidAuth,
+    };
+
+    const script = "def check():\n    return True\n";
+    const first = manifest("standard", ["local-browser"]);
+    const v1 = first.skills.find((item) => item.name === "local-browser")!;
+    v1.files["scripts/check_links.py"] = {
+      content: script, digest: digest(script), encoding: "utf8",
+    };
+    first.generation = computeSkillManifestGeneration(first);
+    await synchronizeSkillManifest({
+      ...common,
+      fetchImpl: vi.fn(() => jsonResponse(first)) as unknown as typeof fetch,
+    });
+
+    const scriptsDir = join(agentsSkillsDir, "local-browser", "scripts");
+    await mkdir(join(scriptsDir, "__pycache__"), { recursive: true });
+    await writeFile(join(scriptsDir, "__pycache__", "check_links.cpython-314.pyc"), "cached");
+    // Read + execute, NO write: the directory can be walked but nothing inside
+    // it can be unlinked, so rm throws EACCES mid-purge.
+    await chmod(scriptsDir, 0o500);
+
+    try {
+      const second = manifest("standard", ["local-browser", "enterprise-skill"]);
+      const result = await synchronizeSkillManifest({
+        ...common,
+        fetchImpl: vi.fn(() => jsonResponse(second)) as unknown as typeof fetch,
+      });
+
+      // The sync completes and every OTHER skill still moves.
+      expect(result.status).toBe("applied");
+      expect(result.installed).toContain("enterprise-skill");
+      // The undeletable one degrades to the pre-fix behaviour: conflict.
+      expect(result.conflicts).toContain("local-browser");
+    } finally {
+      // Tolerate ENOENT: if the purge ever DOES succeed here the directory has
+      // been renamed into the transaction backup, and failing to restore a mode
+      // on a path that no longer exists must not mask the real assertion above.
+      await chmod(scriptsDir, 0o700).catch(() => undefined);
+    }
+  });
+
+  it("NEVER follows a symlink out of the skill root while purging", async () => {
+    // The purge is a delete primitive. Its only attacker-reachable steering is
+    // the directory contents, so a symlink named __pycache__ pointing anywhere
+    // must not be traversed OR removed. Proven on the real tree during review;
+    // pinned here because a future refactor to `stat` from `lstat`, or dropping
+    // the isSymbolicLink guard, silently turns this into `rm -rf` on the target.
+    const fixture = await mkdtemp(join(tmpdir(), "prism-purge-symlink-"));
+    roots.push(fixture);
+    const agentsSkillsDir = join(fixture, ".agents", "skills");
+    const common = {
+      agentsSkillsDir,
+      claudeCodeSkillsDir: join(fixture, ".claude", "skills"),
+      cursorSkillsDir: join(fixture, ".cursor", "skills"),
+      applyManifest: vi.fn(async () => undefined), ...paidAuth,
+    };
+
+    const first = manifest("standard", ["local-browser"]);
+    await synchronizeSkillManifest({
+      ...common,
+      fetchImpl: vi.fn(() => jsonResponse(first)) as unknown as typeof fetch,
+    });
+
+    // A directory outside the skill root that must survive untouched.
+    const victim = join(fixture, "victim");
+    await mkdir(join(victim, "__pycache__"), { recursive: true });
+    await writeFile(join(victim, "canary.pyc"), "must survive");
+    await writeFile(join(victim, "__pycache__", "inner.pyc"), "must survive");
+    await symlink(victim, join(agentsSkillsDir, "local-browser", "__pycache__"));
+
+    const second = manifest("standard", ["local-browser"]);
+    await synchronizeSkillManifest({
+      ...common,
+      fetchImpl: vi.fn(() => jsonResponse(second)) as unknown as typeof fetch,
+    });
+
+    expect(await readFile(join(victim, "canary.pyc"), "utf8")).toBe("must survive");
+    expect(await readFile(join(victim, "__pycache__", "inner.pyc"), "utf8")).toBe("must survive");
+  });
+
+  it("DELETES a tampered .pyc rather than trusting it, and still flags other extra files", async () => {
+    // Why the fix purges instead of exempting .pyc from the integrity walk.
+    // CPython loads a cached .pyc in preference to its source whenever the pyc
+    // header's recorded source mtime and size match the .py — both attacker
+    // chosen. An ignored .pyc would be arbitrary bytecode executing while sync
+    // reported the skill pristine, which is strictly worse than the false
+    // conflict it was meant to silence.
+    //
+    // Second half pins the blast radius: purging bytecode must not blind the
+    // check to any OTHER untracked file. That is the property an over-broad
+    // "ignore untracked files" fix would quietly destroy.
+    const fixture = await mkdtemp(join(tmpdir(), "prism-pyc-tamper-"));
+    roots.push(fixture);
+    const agentsSkillsDir = join(fixture, ".agents", "skills");
+    const common = {
+      agentsSkillsDir,
+      claudeCodeSkillsDir: join(fixture, ".claude", "skills"),
+      cursorSkillsDir: join(fixture, ".cursor", "skills"),
+      applyManifest: vi.fn(async () => undefined), ...paidAuth,
+    };
+
+    const script = "def check():\n    return True\n";
+    const first = manifest("standard", ["local-browser"]);
+    const v1 = first.skills.find((item) => item.name === "local-browser")!;
+    v1.files["scripts/check_links.py"] = {
+      content: script, digest: digest(script), encoding: "utf8",
+    };
+    first.generation = computeSkillManifestGeneration(first);
+    await synchronizeSkillManifest({
+      ...common,
+      fetchImpl: vi.fn(() => jsonResponse(first)) as unknown as typeof fetch,
+    });
+
+    const skillDir = join(agentsSkillsDir, "local-browser");
+    // Loose .pyc beside the source, not inside __pycache__ — the legacy layout.
+    const tampered = join(skillDir, "scripts", "check_links.pyc");
+    await writeFile(tampered, Buffer.from([0xcb, 0x0d, 0x0d, 0x0a, 0xde, 0xad]));
+    // An untracked file that is NOT derived bytecode.
+    const smuggled = join(skillDir, "scripts", "payload.sh");
+    await writeFile(smuggled, "#!/bin/sh\necho owned\n");
+
+    const second = manifest("standard", ["local-browser"]);
+    const v2 = second.skills.find((item) => item.name === "local-browser")!;
+    v2.files["scripts/check_links.py"] = {
+      content: script, digest: digest(script), encoding: "utf8",
+    };
+    second.generation = computeSkillManifestGeneration(second);
+
+    const result = await synchronizeSkillManifest({
+      ...common,
+      fetchImpl: vi.fn(() => jsonResponse(second)) as unknown as typeof fetch,
+    });
+
+    // The bytecode is gone — never trusted, never executed.
+    await expect(lstat(tampered)).rejects.toThrow();
+    // The non-bytecode intruder still freezes the skill, and is preserved.
+    expect(result.conflicts).toContain("local-browser");
+    expect(await readFile(smuggled, "utf8")).toBe("#!/bin/sh\necho owned\n");
+  });
+
   it("BACKS UP the previous content before replacing a pristine managed skill", async () => {
     // The recovery property: an update renames the old directory into the
     // transaction backup before moving the staged one in, so a replaced skill
@@ -1048,6 +1327,46 @@ it.skipIf(process.platform === "win32")("materializes through a pre-existing tra
       await expect(readFile(join(nativeRoot, "paid-skill", "SKILL.md"))).rejects.toThrow();
       expect((await filesUnder(nativeRoot)).some((path) => path.includes("paid-skill"))).toBe(false);
     }
+  });
+
+  it("cleanly REMOVES an unentitled skill that only grew junk, never quarantining it", async () => {
+    // Second site of the same defect, found reviewing the __pycache__ fix.
+    // enforceNativeEntitlements uses the pristine check to choose between
+    // deleting a now-unentitled skill and QUARANTINING it as presumed local
+    // work. A .DS_Store or __pycache__ makes the clean case look hand-edited,
+    // so downgrades silently accrete quarantine litter that nobody ever reads
+    // and nothing ever collects. Entitlement is enforced either way — this is
+    // about not leaving junk directories behind forever.
+    //
+    // Runs the REAL applyManifest path on purpose: enforceNativeEntitlements is
+    // skipped entirely when applyManifest is mocked, which is why every other
+    // test in this file misses it.
+    const agentsSkillsDir = await root();
+    const quarantineBase = join(dirname(agentsSkillsDir), ".prism-skill-quarantine");
+    const paid = manifest("advanced", ["aba-precision-protocol", "paid-skill"]);
+    expect((await synchronizeSkillManifest({
+      agentsSkillsDir, claudeCodeSkillsDir: false, cursorSkillsDir: false, ...paidAuth,
+      fetchImpl: vi.fn(() => jsonResponse(paid)) as unknown as typeof fetch,
+    })).status).toBe("applied");
+
+    // Nobody edited it. A file browser looked at it.
+    await writeFile(join(agentsSkillsDir, "paid-skill", ".DS_Store"), Buffer.from([0x00, 0x00, 0x00, 0x01]));
+
+    const free = manifest("free", []);
+    await applyManagedSkillManifest({
+      generation: free.generation, tier: free.tier, routingVersion: free.routing_version,
+      skills: free.skills.map(({ name, content, digest }) => ({ name, content, digest })),
+    });
+    await synchronizeSkillManifest({
+      agentsSkillsDir, claudeCodeSkillsDir: false, cursorSkillsDir: false, ...paidAuth,
+      fetchImpl: vi.fn(async () => { throw new Error("portal offline after crash"); }) as unknown as typeof fetch,
+    });
+
+    // Gone from discovery either way — that part already worked.
+    await expect(lstat(join(agentsSkillsDir, "paid-skill"))).rejects.toThrow();
+    // ...and gone from disk, rather than parked in quarantine forever.
+    const quarantined = await readdir(quarantineBase).catch(() => [] as string[]);
+    expect(quarantined.filter((entry) => entry.startsWith("paid-skill"))).toEqual([]);
   });
 
   it("creates an absent Cursor skill root before scanning committed entitlement recovery", async () => {
