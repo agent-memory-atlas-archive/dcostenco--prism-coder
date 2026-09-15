@@ -1,6 +1,5 @@
 import {
-  BRAVE_API_KEY, FIRECRAWL_API_KEY, GOOGLE_SEARCH_API_KEY,
-  GOOGLE_SEARCH_CX, SEMANTIC_SCHOLAR_API_KEY,
+  BRAVE_API_KEY, SEMANTIC_SCHOLAR_API_KEY,
   PRISM_SCHOLAR_MAX_ARTICLES_PER_RUN, PRISM_USER_ID,
   PRISM_SCHOLAR_TOPICS, PRISM_ENABLE_HIVEMIND,
   PRISM_SCHOLAR_SCRAPE_BUDGET_MS,
@@ -13,16 +12,12 @@ import { existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, 
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import { performWebSearchRaw } from "../utils/braveApi.js";
-import { performGoogleSearch } from "../utils/googleSearchApi.js";
 import { getTracer } from "../utils/telemetry.js";
 import { searchYahooFree, scrapeArticleLocal } from "./freeSearch.js";
-
-interface FirecrawlScrapeResponse {
-  success: boolean;
-  data: {
-    markdown?: string;
-  };
-}
+// The same capability flag performWebSearchRaw itself branches on, imported
+// from the same module so the gate and the transport cannot disagree about
+// whether a web search is possible.
+import { SYNALUX_SEARCH_AVAILABLE } from "../utils/synaluxSearch.js";
 
 // ─── Hivemind Integration Helpers ────────────────────────────
 
@@ -202,9 +197,20 @@ export async function runWebScholar(overrideTopic?: string, overrideProject?: st
   const span = tracer.startSpan("background.web_scholar");
 
   try {
-    const useGoogle = !!(GOOGLE_SEARCH_API_KEY && GOOGLE_SEARCH_CX);
-    const useBraveFirecrawl = !useGoogle && !!(BRAVE_API_KEY && FIRECRAWL_API_KEY);
-    const useFreeFallback = !useGoogle && !useBraveFirecrawl;
+    // Discovery provider: ask whether a web search is POSSIBLE, not whether
+    // this machine happens to hold a key. performWebSearchRaw serves portal
+    // users from Synalux-side credentials and everyone else from their own
+    // BRAVE_API_KEY, so either one makes web discovery available.
+    //
+    // This used to read `BRAVE_API_KEY && FIRECRAWL_API_KEY`, which was wrong
+    // twice over: a portal-configured user holding no local key was demoted to
+    // the free academic path even though the portal would have served them,
+    // and a user who set only BRAVE_API_KEY was demoted for want of a Firecrawl
+    // key that nothing spends (scraping is always scrapeArticleLocal).
+    //
+    // Google Custom Search used to take priority over both; now removed
+    // because Google discontinues that API on 2027-01-01.
+    const useWebSearch = SYNALUX_SEARCH_AVAILABLE || !!BRAVE_API_KEY;
 
     const topic = overrideTopic || await selectTopic();
     const project = overrideProject || SCHOLAR_PROJECT;
@@ -225,15 +231,29 @@ export async function runWebScholar(overrideTopic?: string, overrideProject?: st
 
     await hivemindHeartbeat(`Searching for: ${topic}`);
     let urls: string[] = [];
+    // Set when web search was selected but the request itself failed. The run
+    // then continues on the free path and says so at the top of its report.
+    let webSearchFailure: string | null = null;
 
-    if (useGoogle) {
-      const googleResults = await performGoogleSearch(GOOGLE_SEARCH_API_KEY!, GOOGLE_SEARCH_CX!, topic, PRISM_SCHOLAR_MAX_ARTICLES_PER_RUN);
-      urls = googleResults.map(r => r.url).filter(Boolean);
-    } else if (useBraveFirecrawl) {
-      const braveResponse = await performWebSearchRaw(topic, PRISM_SCHOLAR_MAX_ARTICLES_PER_RUN);
-      const braveData = JSON.parse(braveResponse);
-      urls = (braveData.web?.results || []).map((r: any) => r.url).filter(Boolean);
-    } else {
+    if (useWebSearch) {
+      try {
+        const braveResponse = await performWebSearchRaw(topic, PRISM_SCHOLAR_MAX_ARTICLES_PER_RUN);
+        const braveData = JSON.parse(braveResponse);
+        urls = (braveData.web?.results || []).map((r: any) => r.url).filter(Boolean);
+      } catch (err) {
+        // The portal refuses web search for free plans (403) and for stale
+        // credentials (401), and a direct Brave key can be bad or rate-limited.
+        // Before the capability gate above, a signed-in free account never
+        // reached the portal from here — the gate looked only for a local key —
+        // so it took the free academic path below. Fall back to exactly that
+        // path. The transport (braveApi.ts portalFirst) has already applied the
+        // one permitted escape — the user's own key on a plan refusal — so
+        // Scholar adds no second attempt of its own.
+        webSearchFailure = err instanceof Error ? err.message : String(err);
+        console.error(`[WebScholar] Web search unavailable, continuing on free sources: ${webSearchFailure}`);
+      }
+    }
+    if (!useWebSearch || webSearchFailure !== null) {
       // Parallel Academic Discovery (PubMed + ERIC + Semantic Scholar)
       const academicCount = Math.ceil(PRISM_SCHOLAR_MAX_ARTICLES_PER_RUN / 2);
       const academicResults = await Promise.all([
@@ -312,6 +332,12 @@ export async function runWebScholar(overrideTopic?: string, overrideProject?: st
     });
 
     await hivemindBroadcast(topic, scrapedTexts.length);
+    // The ledger keeps the clean report; the caller (tool result, dashboard)
+    // is told when the sources were not the ones its credentials implied, so
+    // a paid account's portal outage is never a silent downgrade.
+    if (webSearchFailure !== null) {
+      return `Note: web search was unavailable (${webSearchFailure}); this report used the free academic sources.\n\n${summary}`;
+    }
     return summary;
 
   } catch (err) {

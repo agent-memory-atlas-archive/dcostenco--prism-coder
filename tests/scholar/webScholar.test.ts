@@ -22,11 +22,12 @@
  *
  * ISOLATION:
  *   We test using mocked storage and config to avoid real API calls
- *   to Brave Search and Firecrawl. The core logic (topic selection,
- *   reentrancy) is pure business logic that doesn't need network.
+ *   to Brave Search, the portal and the academic sources. The core logic
+ *   (topic selection, reentrancy) is pure business logic that doesn't need
+ *   network.
  *
  * ARCHITECTURE NOTE:
- *   runWebScholar() is integration-heavy (Brave → Firecrawl → LLM → DB),
+ *   runWebScholar() is integration-heavy (search → local scrape → LLM → DB),
  *   so we mock at the module boundary. selectTopic() and the reentrancy
  *   guard are unit-tested directly via module internals.
  * ═══════════════════════════════════════════════════════════════════
@@ -42,9 +43,9 @@ const { mockConfig, mockStorage, mockFetch } = vi.hoisted(() => {
   const mockConfig = {
     BRAVE_API_KEY: "test-brave-key",
     FIRECRAWL_API_KEY: "test-firecrawl-key",
-    TAVILY_API_KEY: undefined,
-    GOOGLE_SEARCH_API_KEY: undefined,
-    GOOGLE_SEARCH_CX: undefined,
+    // Portal ("paid") credentials. webScholar reads this through
+    // synaluxSearch.js, which is mocked below to track this flag live.
+    SYNALUX_SEARCH_AVAILABLE: false,
     SEMANTIC_SCHOLAR_API_KEY: undefined,
     PRISM_SCHOLAR_MAX_ARTICLES_PER_RUN: 3,
     // This mock replaces config.js wholesale, so every named export the
@@ -97,6 +98,15 @@ vi.mock("../../src/storage/index.js", () => ({
   getStorage: vi.fn().mockResolvedValue(mockStorage),
 }));
 
+// SYNALUX_SEARCH_AVAILABLE is a module-load const in the real module, so it
+// cannot be flipped per test. A getter over the shared mock config lets each
+// case choose whether portal credentials are present.
+vi.mock("../../src/utils/synaluxSearch.js", () => ({
+  get SYNALUX_SEARCH_AVAILABLE() {
+    return mockConfig.SYNALUX_SEARCH_AVAILABLE;
+  },
+}));
+
 vi.mock("../../src/utils/braveApi.js", () => ({
   performWebSearchRaw: vi.fn().mockResolvedValue(JSON.stringify({
     web: {
@@ -128,7 +138,7 @@ vi.mock("../../src/utils/logger.js", () => ({
   debugLog: vi.fn(),
 }));
 
-// Stub global fetch for Firecrawl
+// Stub global fetch for the academic discovery calls
 vi.stubGlobal("fetch", mockFetch);
 
 // ─── Import after mocks ────────────────────────────────────────
@@ -197,16 +207,16 @@ describe("Web Scholar — Reentrancy Guard", () => {
    * all future Scholar runs until process restart.
    */
   it("should release the lock on pipeline failure", async () => {
-    // Make the first run crash
-    const { performWebSearchRaw } = await import("../../src/utils/braveApi.js");
-    (performWebSearchRaw as any)
-      .mockRejectedValueOnce(new Error("Brave API timeout"))
-      .mockResolvedValueOnce(JSON.stringify({
-        web: { results: [{ url: "https://example.com/recovery" }] }
-      }));
+    // Make the first run crash. The crash must come from a stage that still
+    // propagates: a failing web search no longer throws out of the pipeline
+    // (it degrades to the free sources), so a synthesis failure is used here
+    // to keep exercising the finally{} release path.
+    const { getLLMProvider } = await import("../../src/utils/llm/factory.js");
+    (getLLMProvider as any)().generateText.mockRejectedValueOnce(new Error("LLM provider timeout"));
 
     // First run should fail
-    await runWebScholar();
+    const failed = await runWebScholar();
+    expect(failed).toMatch(/^Error:/);
     expect(mockStorage.saveLedger).not.toHaveBeenCalled();
 
     // Second run should succeed (lock was released in finally{})
@@ -215,8 +225,12 @@ describe("Web Scholar — Reentrancy Guard", () => {
   });
 
   /**
-   * Verifies the pipeline is skipped entirely when API keys are missing.
-   * This tests the fast-exit path before any external calls.
+   * Verifies nothing is saved when no discovery provider yields a URL.
+   *
+   * This is NOT a fast exit before external calls: with Brave's keys absent
+   * the run still walks the free academic path (PubMed + ERIC + Semantic
+   * Scholar, then Yahoo). Those are stubbed empty here, so there is nothing
+   * to scrape and nothing to save — and the lock is still released.
    */
   it("should skip when API keys are missing", async () => {
     mockConfig.BRAVE_API_KEY = "";
@@ -231,6 +245,180 @@ describe("Web Scholar — Reentrancy Guard", () => {
     mockConfig.FIRECRAWL_API_KEY = "test-firecrawl-key";
     await runWebScholar();
     expect(mockStorage.saveLedger).toHaveBeenCalledTimes(1);
+  });
+
+});
+
+// ═══════════════════════════════════════════════════════════════════
+// 1b. DISCOVERY PROVIDER SELECTION (tier / credential matrix)
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * Who gets web discovery, and off whose credentials.
+ *
+ * performWebSearchRaw serves portal users from Synalux-side credentials and
+ * everyone else from their own BRAVE_API_KEY. Scholar must therefore gate on
+ * whether a search is POSSIBLE, not on whether this machine holds a key.
+ *
+ * WHY THIS MATTERS:
+ *   The gate used to read `BRAVE_API_KEY && FIRECRAWL_API_KEY`, which was
+ *   wrong twice. A portal-configured user holding no local key was silently
+ *   demoted to the free academic path — paying for search and getting the
+ *   free-tier experience. And a user who set only BRAVE_API_KEY was demoted
+ *   for want of a Firecrawl key that nothing spends, since scraping is always
+ *   the local scraper.
+ *
+ *   Nothing else in the suite asserts WHICH source a run used: every branch
+ *   still produces a report, so a wrong gate is invisible without these.
+ */
+describe("Web Scholar — Discovery Provider Selection", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockConfig.BRAVE_API_KEY = "test-brave-key";
+    mockConfig.FIRECRAWL_API_KEY = "test-firecrawl-key";
+    mockConfig.SYNALUX_SEARCH_AVAILABLE = false;
+    mockConfig.PRISM_SCHOLAR_TOPICS = ["ai", "agents"];
+    mockConfig.PRISM_ENABLE_HIVEMIND = false;
+  });
+
+  /** Paid tier: portal credentials, no local keys at all. THE REGRESSION. */
+  it("uses web search for a portal user holding no local keys", async () => {
+    const { performWebSearchRaw } = await import("../../src/utils/braveApi.js");
+    mockConfig.SYNALUX_SEARCH_AVAILABLE = true;
+    mockConfig.BRAVE_API_KEY = "";
+    mockConfig.FIRECRAWL_API_KEY = "";
+
+    await runWebScholar();
+
+    // Before the fix this fell through to the academic path: 0 calls.
+    expect(performWebSearchRaw).toHaveBeenCalledTimes(1);
+    expect(mockStorage.saveLedger).toHaveBeenCalledTimes(1);
+  });
+
+  /** Free tier, own key: the user's BRAVE_API_KEY is what search runs on. */
+  it("uses web search for a non-portal user who supplied their own Brave key", async () => {
+    const { performWebSearchRaw } = await import("../../src/utils/braveApi.js");
+    mockConfig.SYNALUX_SEARCH_AVAILABLE = false;
+
+    await runWebScholar();
+
+    expect(performWebSearchRaw).toHaveBeenCalledTimes(1);
+    expect(mockStorage.saveLedger).toHaveBeenCalledTimes(1);
+  });
+
+  /** A local Brave key alone is enough — Firecrawl gates nothing. */
+  it("uses web search with BRAVE_API_KEY alone, with no Firecrawl key", async () => {
+    const { performWebSearchRaw } = await import("../../src/utils/braveApi.js");
+    mockConfig.SYNALUX_SEARCH_AVAILABLE = false;
+    mockConfig.FIRECRAWL_API_KEY = "";
+
+    await runWebScholar();
+
+    expect(performWebSearchRaw).toHaveBeenCalledTimes(1);
+  });
+
+  /** Both available: still one search. Which credential wins is the
+   *  transport's decision (portal-first), deliberately not re-made here. */
+  it("uses web search when both portal and local credentials are present", async () => {
+    const { performWebSearchRaw } = await import("../../src/utils/braveApi.js");
+    mockConfig.SYNALUX_SEARCH_AVAILABLE = true;
+
+    await runWebScholar();
+
+    expect(performWebSearchRaw).toHaveBeenCalledTimes(1);
+  });
+
+  /** No credentials anywhere: the free academic path, and Brave is never
+   *  called — calling it would throw on the missing key. */
+  it("uses the free path and never calls Brave when no credentials exist", async () => {
+    const { performWebSearchRaw } = await import("../../src/utils/braveApi.js");
+    const { searchYahooFree } = await import("../../src/scholar/freeSearch.js");
+    (searchYahooFree as any).mockResolvedValueOnce([
+      { url: "https://example.org/free-article" },
+    ]);
+    mockConfig.SYNALUX_SEARCH_AVAILABLE = false;
+    mockConfig.BRAVE_API_KEY = "";
+    mockConfig.FIRECRAWL_API_KEY = "";
+
+    await runWebScholar();
+
+    expect(performWebSearchRaw).not.toHaveBeenCalled();
+    expect(mockStorage.saveLedger).toHaveBeenCalledTimes(1);
+  });
+
+  /**
+   * THE REGRESSION the capability gate would otherwise introduce.
+   *
+   * SYNALUX_SEARCH_AVAILABLE is true for every `prism connect` login, free
+   * plans included, and the portal answers a free plan's search with
+   * 403 "Cloud Search requires Standard plan or higher". Before the gate
+   * change such an account never reached the portal from Scholar — it took
+   * the free academic path and got results. Routing it to web search and
+   * letting the 403 end the run would turn a working free tier into
+   * `Error: ...` with no articles.
+   */
+  it("continues on the free path when the portal refuses web search, and says so", async () => {
+    const { performWebSearchRaw } = await import("../../src/utils/braveApi.js");
+    const { searchYahooFree } = await import("../../src/scholar/freeSearch.js");
+    (performWebSearchRaw as any).mockRejectedValueOnce(
+      new Error("[synaluxSearch] /api/v1/prism/search HTTP 403: Cloud Search requires Standard plan or higher."),
+    );
+    (searchYahooFree as any).mockResolvedValueOnce([
+      { url: "https://example.org/free-article" },
+    ]);
+    mockConfig.SYNALUX_SEARCH_AVAILABLE = true;
+    mockConfig.BRAVE_API_KEY = "";
+
+    const result = await runWebScholar();
+
+    expect(performWebSearchRaw).toHaveBeenCalledTimes(1);
+    expect(mockStorage.saveLedger).toHaveBeenCalledTimes(1);
+    expect(result).toContain("web search was unavailable");
+    expect(result).toContain("HTTP 403");
+    expect(result).not.toMatch(/^Error:/);
+  });
+
+  /**
+   * Scholar adds no attempt of its own. Whether the user's own key may
+   * answer a refusal is decided inside the transport (braveApi.ts
+   * portalFirst: yes on a plan refusal, never on an expired login or an
+   * outage). Here the login is expired, a local key is present, and the
+   * transport has said no: Scholar makes exactly one transport call and
+   * continues on the free sources.
+   */
+  it("makes exactly one transport call on a refusal; the own-key decision belongs to the transport", async () => {
+    const { performWebSearchRaw } = await import("../../src/utils/braveApi.js");
+    const { searchYahooFree } = await import("../../src/scholar/freeSearch.js");
+    (performWebSearchRaw as any).mockRejectedValueOnce(
+      new Error("[synaluxSearch] /api/v1/prism/search HTTP 401: JWT re-exchange failed"),
+    );
+    (searchYahooFree as any).mockResolvedValueOnce([
+      { url: "https://example.org/free-article" },
+    ]);
+    mockConfig.SYNALUX_SEARCH_AVAILABLE = true;
+    mockConfig.BRAVE_API_KEY = "test-brave-key";
+
+    const result = await runWebScholar();
+
+    expect(performWebSearchRaw).toHaveBeenCalledTimes(1);
+    expect(mockStorage.saveLedger).toHaveBeenCalledTimes(1);
+    expect(result).toContain("web search was unavailable");
+  });
+
+  /** The ledger gets the clean report; only the caller sees the note. */
+  it("keeps the fallback note out of the stored ledger", async () => {
+    const { performWebSearchRaw } = await import("../../src/utils/braveApi.js");
+    const { searchYahooFree } = await import("../../src/scholar/freeSearch.js");
+    (performWebSearchRaw as any).mockRejectedValueOnce(new Error("HTTP 403"));
+    (searchYahooFree as any).mockResolvedValueOnce([{ url: "https://example.org/free-article" }]);
+    mockConfig.SYNALUX_SEARCH_AVAILABLE = true;
+    mockConfig.BRAVE_API_KEY = "";
+
+    await runWebScholar();
+
+    const saved = mockStorage.saveLedger.mock.calls[0][0];
+    expect(saved.summary).not.toContain("web search was unavailable");
+    expect(saved.summary).toContain("Research:");
   });
 });
 

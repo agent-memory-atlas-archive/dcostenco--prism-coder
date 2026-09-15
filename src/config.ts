@@ -85,14 +85,6 @@ if (!BRAVE_ANSWERS_API_KEY && process.env.PRISM_DEBUG_LOGGING === "true") {
 // ─── Optional: Voyage AI Embeddings ──────────────────────────
 // Set embedding_provider=voyage to enable. Requires VOYAGE_API_KEY.
 export const VOYAGE_API_KEY = process.env.VOYAGE_API_KEY; // embedding_provider=voyage
-// ─── Optional: Google Search (Scholar Pipeline Fallback) ──────
-// Used when Brave or Tavily keys are missing.
-// Requires: Google Custom Search API Key + Search Engine ID (CX).
-// Get yours at: https://developers.google.com/custom-search/v1/overview
-
-export const GOOGLE_SEARCH_API_KEY = process.env.GOOGLE_SEARCH_API_KEY;
-export const GOOGLE_SEARCH_CX = process.env.GOOGLE_SEARCH_CX;
-
 // ─── v2.0 / v12.1 / v13: Storage Backend Selection ──────────
 // Three backends are implemented:
 //   "local"    — SQLite, fully offline. Free-tier default.
@@ -251,13 +243,19 @@ export const PRISM_SCHEDULER_INTERVAL_MS = parseInt(
 );
 
 // ─── v5.4: Autonomous Web Scholar ─────────────────────────────
-// Background LLM research pipeline powered by Brave Search + Firecrawl.
+// Background LLM research pipeline: web search or free academic discovery,
+// local scrape, LLM synthesis.
 
 export const FIRECRAWL_API_KEY = process.env.FIRECRAWL_API_KEY;
 export const PRISM_SCHOLAR_ENABLED = process.env.PRISM_SCHOLAR_ENABLED === "true";
 
-if (PRISM_SCHOLAR_ENABLED && !FIRECRAWL_API_KEY) {
-  console.error("Warning: FIRECRAWL_API_KEY not set. Web Scholar will fall back to free search.");
+// FIRECRAWL_API_KEY is currently unspent: Web Scholar scrapes with its own
+// local scraper, and discovery is now selected by whether a web
+// search is possible at all (portal credentials or BRAVE_API_KEY), not by the
+// presence of this key. Kept exported so an existing .env does not break.
+// The warning below is about the key Scholar actually needs.
+if (PRISM_SCHOLAR_ENABLED && !BRAVE_API_KEY && !SYNALUX_CONFIGURED) {
+  console.error("Warning: no web search configured (BRAVE_API_KEY or a Synalux portal login). Web Scholar will use the free academic sources.");
 }
 export const PRISM_SCHOLAR_INTERVAL_MS = parseInt(
   process.env.PRISM_SCHOLAR_INTERVAL_MS || "0", 10  // Default manual-only

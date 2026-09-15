@@ -2,6 +2,117 @@
 
 All notable changes to this project will be documented in this file.
 
+## Unreleased
+
+### Paid users get the search they are paying for
+
+Web Scholar chose its discovery source by asking whether **this machine held a
+key**, rather than whether a search was possible:
+
+```ts
+const useBraveFirecrawl = !!(BRAVE_API_KEY && FIRECRAWL_API_KEY);
+```
+
+`performWebSearchRaw` already serves portal users from Synalux-side credentials
+and everyone else from their own `BRAVE_API_KEY`. The gate never consulted that,
+so a **portal-configured user holding no local key was silently demoted to the
+free academic path** — paying for web search and getting the free-tier sources.
+A user who set only `BRAVE_API_KEY` was demoted too, for want of a Firecrawl key
+that nothing spends.
+
+The gate now asks the same question the transport answers:
+
+```ts
+const useWebSearch = SYNALUX_SEARCH_AVAILABLE || !!BRAVE_API_KEY;
+```
+
+Which credential is used remains the transport's decision — portal first, so
+credentials and query redaction stay server-side. `FIRECRAWL_API_KEY` is now
+unused everywhere (scraping has always been the local scraper); it stays
+exported so existing `.env` files do not break, and the config warning it drove
+— which claimed Scholar would "fall back to free search" without it — now names
+the credentials Scholar actually needs.
+
+Five tests pin the matrix: portal-only, local-key-only, Brave-without-Firecrawl,
+both, and neither. Fail-before verified — the old gate fails the portal-only and
+Brave-alone cases with "expected to be called 1 times, but got 0 times".
+
+Routing a signed-in account to web search exposed a second gap: the portal
+answers a **free plan's** search with `403 Cloud Search requires Standard plan
+or higher`, and before this change such an account never reached the portal
+from Scholar, so it had been getting academic results. Scholar now treats a
+failed web search — portal refusal, expired login, rejected Brave key — as a
+reason to continue on the free academic path, never as a reason to end the
+run, and the returned report opens with a note saying which sources it used.
+The stored ledger entry stays clean. Scholar itself adds no second attempt;
+whether the user's own key may answer a refusal is the transport's decision
+(next section). Three more tests pin this (portal 403 → academic results
+saved; exactly one transport call; no note in the ledger).
+
+### A free account uses its own key when the portal refuses the plan
+
+`SYNALUX_SEARCH_AVAILABLE` is true for every `prism connect` login, and every
+search tool went portal-first with no way back, so a **free** account that had
+configured its own `BRAVE_API_KEY` could never use it while signed in: the
+portal's 403 was the answer. Now, when the portal refuses the *plan* — 403
+with `upgrade_url` or "plan" in the body — and the user configured their own
+key, the same request is made on that key, exactly as it would be for a user
+who never signed in. This applies to `brave_web_search`, `brave_local_search`,
+`brave_answers`, their code-mode variants, `query_memory_natural`'s grounded
+search, and Web Scholar.
+
+The privacy boundary is otherwise unchanged: an outage (5xx), a quota (429,
+even though it also carries `upgrade_url`), an expired login (401), or a 403
+that is not a plan refusal (the MFA challenge) still never turns into a
+direct provider call with the original query. Without an own key the refusal
+propagates as before. Portal HTTP errors are now a typed `PortalHttpError`
+(same message) so the transport can tell these apart without parsing text.
+
+Nine tests pin the matrix in `tests/braveApiPlanRefusal.test.ts`; fail-before
+verified against the previous transport (the four own-key cases reject with
+`HTTP 403`, the five no-escape cases already passed).
+
+The docs had kept describing a client-side auto-scheduler (`Every 5 Minutes`,
+`Web Scholar: 🟢 Enabled (every 5m)`) that was retired in v18.0.0, and a
+Firecrawl key that nothing spends. WEB_SCHOLAR.md, ARCHITECTURE.md,
+`.env.example` and the `scholar_research` tool description now describe the
+pipeline that ships.
+
+### Web Scholar drops the search API Google is switching off
+
+- Removes the Google Custom Search discovery path (`GOOGLE_SEARCH_API_KEY` +
+  `GOOGLE_SEARCH_CX`). Google closed that API to new customers in 2025 and
+  discontinues it for existing customers on 2027-01-01, and its recommended
+  successor — Vertex AI Search — is site search over up to 50 domains, not full
+  web search. The branch was already unreachable for anyone without a legacy
+  key.
+- **Behaviour change:** a run that set both Google variables now uses Brave, or
+  the free academic path when Brave is unconfigured. The path was opt-in and
+  undocumented; nothing else moves.
+- Removes the Tavily remnants in `.env.example` and `docs/ARCHITECTURE.md`. The
+  Tavily integration itself was deleted long ago (`PROVENANCE.md`), but the docs
+  still advertised it as a Brave+Firecrawl replacement.
+
+### Web Scholar documentation now matches the code
+
+`docs/WEB_SCHOLAR.md` carried three claims the code contradicts:
+
+- *"All three keys are required; if any are missing the pipeline fails silently
+  and the dashboard shows Disabled."* It does not. Missing search keys select
+  the free academic path (PubMed + ERIC + Semantic Scholar, then Yahoo), which
+  needs no key at all. Only a text-provider key is genuinely required.
+- *"Brave Search → Firecrawl Scrape."* Firecrawl is never called; scraping is
+  always the built-in local scraper. `FIRECRAWL_API_KEY` acts only as a
+  companion flag that selects the Brave branch — so setting `BRAVE_API_KEY`
+  alone silently leaves you on the free path, which is now documented.
+- *"Scheduled — runs automatically at a configurable interval."* Not locally:
+  the client-side scheduler was retired in v18.0.0 and `startScholarScheduler()`
+  has no caller, so `PRISM_SCHOLAR_INTERVAL_MS` does nothing on a local install.
+  Scheduled runs happen server-side via portal cron.
+
+Also documents that discovery has no cross-provider failover, and that
+`GOOGLE_API_KEY` is the AI Studio synthesis key rather than a search key.
+
 ## 20.18.2 — 2026-09-14
 
 ### Regenerable junk no longer freezes a skill out of sync

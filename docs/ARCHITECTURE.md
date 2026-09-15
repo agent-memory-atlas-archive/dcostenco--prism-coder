@@ -534,7 +534,8 @@ Results are accumulated into a `SchedulerSweepResult` and served to the dashboar
 Autonomous research pipeline:
 
 ```
-Pick random topic → Brave Search → Firecrawl scrape
+Pick topic → web search (Synalux portal or own BRAVE_API_KEY) or free academic
+discovery (PubMed + ERIC + Semantic Scholar, then Yahoo) → local scrape
 → Trim to 15K chars → LLM synthesis → Save to ledger (importance: 7)
 ```
 
@@ -752,8 +753,7 @@ The `--storage` flag prevents split-brain when CLI env differs from MCP server c
 | `GOOGLE_API_KEY` | Gemini LLM + embeddings + paper analysis |
 | `VOYAGE_API_KEY` | Voyage AI embeddings (Anthropic-recommended) |
 | `BRAVE_ANSWERS_API_KEY` | Brave Answers AI-grounded tool |
-| `FIRECRAWL_API_KEY` | Web scraping for Scholar pipeline |
-| `TAVILY_API_KEY` | Alternative search for Scholar (replaces Brave + Firecrawl) |
+| `FIRECRAWL_API_KEY` | Currently unused — Scholar scrapes locally and selects discovery by search availability |
 
 ### 13.3 Storage
 
