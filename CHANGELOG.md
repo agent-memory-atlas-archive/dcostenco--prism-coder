@@ -4,6 +4,157 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+### `prism_infer` takes the conversation, not just the last line
+
+`prism_infer` was single-shot: one optional system message and exactly one
+user message, whatever the host had said to the worker before. Without the
+earlier turns the larger tiers do not decline a follow-up they cannot answer,
+they fabricate — probed 2026-09-15, the 9b answered "what is my codename?"
+with a confident invented name when the turn that set it was missing.
+
+An optional `messages` array now carries prior turns, oldest first, each
+`{role: "user" | "assistant", content}`; `prompt` stays the current turn. The
+host curates the history (send only turns you accepted, as a brief, not a
+transcript); Prism bounds, screens, counts and forwards it, and never stores
+it:
+
+- **A paid-plan feature, bounded by the plan, rejected not trimmed.** Whether
+  multi-turn is available and its turn and character caps are entitlements
+  set in the portal's plan table (the portal's companion change — deploy it BEFORE this
+  release, or every plan is refused with `multi_turn_not_in_plan`), not decisions the client makes: Prism is a
+  thin client. It enforces whatever the portal says, refuses an over-cap call
+  naming the caps (`history_over_plan_cap`), and refuses outright on a free
+  plan, a host with no portal, or a portal that says nothing
+  (`multi_turn_not_in_plan`, with the upgrade URL) — the client's own default
+  is OFF, so no one gets a paid feature without an account. An absolute
+  ceiling of 49 turns / 128,000 characters of history (49 prior turns plus the current one meet the
+  portal's 50-message cap exactly), with the current prompt capped at 128,000 characters alongside it,
+  bounds any plan. User and assistant roles only, text only; a `system` turn or
+  an image fails validation. Silently dropping the turn that mattered is the
+  truncation class the context gate exists to prevent.
+- **Screened alone, then in context.** Every history turn is classified alone
+  (in ≤3,600-char windows overlapping by 200, so nothing shorter than that
+  hides in the middle of a long turn; the deterministic rules overlap by
+  3,800), the
+  current prompt alone through the classifier's own call unless it is at most
+  4,000 chars and the deterministic rules call it routine, and every verdict
+  from a read alone is kept: reserved is final (nothing written later can lower
+  it); uncertain goes to the cloud when the plan allows it and is refused
+  otherwise, never served locally (a request carrying an image keeps the
+  existing image policy: local only, never cloud); an error takes the path a
+  single-prompt error always took: cloud when it is allowed and answers,
+  otherwise the keyword net over the whole conversation decides and keyword-
+  clean text is served locally (the one path that is not fail-closed, an
+  availability policy kept from single turns), and three errors in a row are
+  treated as uncertain. Then each turn and the current prompt are classified
+  in context (the tail of the role-labelled transcript ending at that turn),
+  which can only raise the verdict: intent spread across turns that each read
+  clean alone is caught there when both parts fall inside one window, the
+  last 3,600 chars of the transcript up to the end of the later part's turn;
+  windows exist only at turn ends, so a later part at the start of a long
+  turn, or parts further apart than that, are never in one read (the
+  window's size and placement are the limit). The deterministic rules run per turn (the
+  operational ones on user turns only), the keyword floor and
+  reserved-category attribution over the whole conversation. A reserved
+  phrase in a user turn is handled exactly as in a single prompt: refused for
+  a text call, the image policy for a call with an image. In the model's own
+  earlier answer the operational rules do not run; the clinical rules, the
+  keyword floor and the semantic reads do.
+- **Counted.** Every turn, plus per-message template framing, is charged to the
+  tier's context window, so the 4,096-token tiers are skipped rather than
+  truncated.
+- **Forwarded on escalation.** The portal's inference route already accepts a
+  `messages` array; the cloud client now sends the whole conversation instead
+  of the bare prompt, and refuses locally with `history_over_cloud_cap` before
+  any network call when the flattened transcript would exceed the portal's
+  32 KB limit.
+
+Every installed tier reads role-structured history correctly, including a
+turn another tier wrote (five writer/reader pairs probed, all recalled). A
+call without `messages` is byte-for-byte the call the handler made before.
+
+35 tests in `tests/tools/prismInferMultiTurn.test.ts`, nine of them proven
+to fail against the previous handler for the named reason: no history reached
+the model, the validator ignored it, the safety screen saw only the current
+turn (the reserved history was served by the 9b), the context gate did not
+count it, escalation dropped it.
+
+### The host is told the worker can hold a conversation, and what it costs
+
+A feature the host is instructed not to use is invisible. Four surfaces now
+carry it: the `prism_infer` description says follow-ups need `messages` and
+that a stateless follow-up fabricates; every entitlement-resolved result reports `multi_turn`
+(the plan's caps) and `history_turns` (a count, never content), so the host
+learns its budget from the first call instead of from a refusal; the startup
+display prints one line — on with the caps, or off on this plan — whenever the
+entitlements cache is warm, read from the cache only, never a portal fetch on
+the startup path (a cold cache prints nothing; the first `prism_infer` result
+carries the policy); and
+`session_task_route` returns `needs_history: true` when a task reads as a
+follow-up ("now…", "the same…", "your previous answer"), with the shared
+local-first policy telling every host to attach the accepted prior turns when
+it does. The router holds no turns; attaching them stays the host's job. Bare
+pronouns are deliberately not cues, so "fix it" stays a standalone task.
+
+35 tests in `tests/tools/prismInferMultiTurn.test.ts` (nine proven to
+fail against the previous handler, one compatibility baseline, two guards, nine
+regression cases for the caps, retries, verdict severity and escalation
+payload, 8 for the entitlement-ruled policy), plus an opt-in live suite in `tests/live/multiTurn.live.test.ts` (`PRISM_LIVE_TESTS=1`) that runs
+only when a local Ollama serves the tiers and pins what was verified by hand:
+every tier reads role history through the real local call, a no-history
+control fails, and the 9b recalls the first turn across a history past its
+old window.
+
+### The 9b context pin survives `prism update-models`
+
+`scripts/prism-coder-9b.Modelfile` rebuilds `prism-coder:9b` FROM the same
+weights with `PARAMETER num_ctx 32768` — the manifest digest changes and
+nothing else. Convergence judged an alias stale by digest, so the next
+`prism update-models` would have `ollama cp`'d the unpinned upstream over the
+pinned tag and silently undone the pin. Found before it happened.
+
+Stale now means OLD WEIGHTS. Convergence reads each tag's `FROM` blob and
+`num_ctx` from `/api/show`; a pin on the same weights is left alone
+(`up_to_date`, `locally_pinned`), and a pin on superseded weights is rebuilt
+with the lost pin announced together with the exact re-adopt command
+(`pin_dropped_readopt`). Hosts whose Ollama cannot answer `/api/show` keep the
+digest rule. Four regression tests, the first proven to fail before the fix.
+
+Two context-gate tests that asserted the table's 4,096-token window read
+`num_ctx` from the live daemon instead of injecting a probe, so they passed on
+CI and failed on a host with the pin adopted. They now inject the probe.
+
+### Hardened by twenty-three adversarial review rounds before merge
+
+Two independent reviewers (Codex CLI and a verifier agent that reverted each fix and
+confirmed its regression test failed) reviewed the feature and then each round of fixes.
+Every bullet below carries a test that failed on the code before it.
+
+- `prism_infer`'s input schema now stays under Codex's 5,000-byte schema-compaction budget (was ~5,800), so Codex sees every parameter description including the `messages` contract; the description no longer claims Codex drops parameter text unconditionally. Regression: `tests/tools/prismInferSchemaBudget.test.ts`.
+- Multi-turn hardening from the pre-merge adversarial review: history turns longer than the Layer-1 full-read limit are classified in overlapping windows, so no region of a turn goes unscreened; a call carrying history is always screened, whatever `mode`/`max_tokens` pair it uses; the silent-truncation backstop counts the whole input (prompt plus history), not the current prompt alone; the code-repair retry carries the same images and history as the first call; and the cloud cap now mirrors the portal byte-for-byte (50 messages including the current turn, portal-exact flattening), so nothing the client accepts is refused with 413 upstream.
+- Second review round: the deterministic crisis/medical intercept now reads every user history turn, not only the current prompt (user turns only as of the fourth round) (the portal already screened the flattened conversation; the client was weaker than the server it forwards to); Layer-1 screening of history stops at the first OBVIOUS_RESERVED verdict and caches window verdicts by content hash (no turn text retained), so a follow-up no longer re-screens every prior turn; a portal outage is reported as `entitlements_source=fallback_free`, not as "not in the free plan", to a paying customer; an over-ceiling or malformed `messages` is refused with the ceiling named; `session_task_route` no longer flags "Next.js 15 migration plan" or "Also fix the typo in README" as follow-ups (a leading connective needs an anaphor), and the delegation-disabled route carries `needs_history` like every other; the startup line honours the entitlement cache TTL; a converge run says when `/api/show` facts are unavailable and the digest rule applies. Unchanged by design and now documented: a reserved history turn with an image is served local-only with cloud pinned off, per the 2026-08-18 clinical-image ruling.
+- Third review round: the caller-controlled Layer-1 skip (`mode: route` + `max_tokens <= 16`, the classifier's old signature) is gone — the classifier never re-enters `prism_infer`, so it only ever served as a bypass; every call is screened. History-window verdicts expire after 15 minutes so a classifier alias rebuilt in place cannot keep a stale clearance; windows never cut a surrogate pair; the crisis intercept checks each turn separately so adjacent turns cannot synthesise a phrase; the code-repair retry is sized like the first call (history, images, effective system prompt, live window); `prism update-models` leaves an alias alone, and says so, when `/api/show` cannot tell a local pin from stale weights; a bare "continue" / "keep going" is a follow-up cue; the live suite no longer probes Ollama unless opted in. Documented and unchanged: the `system` argument is not screened (a clinical system prompt would false-positive the crisis intercept); last-known-good entitlements persist through a portal outage (the fail-closed safety controls depend on it); the half-window truncation signature keeps its ±8-token band.
+- Fourth review round (measured by the second reviewer): a whitespace-only window inside a long history turn no longer returns an ERROR verdict that pushed a benign conversation to the cloud; the deterministic Layer-1 rules run over each WHOLE turn as well as its windows, so a co-occurrence split across two windows still fires (superseded in the sixth round: 7,200-char proximity windows); the crisis intercept screens user turns only (the worker's own prior answer is not a first-person disclosure); the absolute turn ceiling is 49 so that 49 prior turns plus the current one meet the portal's 50-message cap exactly; the single-prompt cloud path fails fast above the portal's 32 KB body cap (`prompt_over_cloud_cap`) instead of a doomed 413 round trip; "redo that" / "do it again" are follow-up cues. Release note: the half-window truncation signature (±8 tokens of num_ctx/2) can, about once in two thousand long calls, abandon a conversation that genuinely fits; with a single installed tier that is a hard failure, not a downgrade.
+- Fifth and sixth rounds: `prism update-models` exits non-zero when any installed tier failed to converge; the verdict cache keeps monotonic time; the deterministic co-occurrence floor over history runs in 7,200-char proximity windows rather than over a whole turn, after a measured false positive refused a 20 KB pasted source file ("diagnose" and "determine" 14k chars apart) and, on a cloud plan, shipped it off-device; "a jumping off point for the refactor" no longer trips the crisis intercept; the bare "continue" cue matches only the bare verb, so "Continue integration tests for the parser" and "Go on-call rotation doc" are standalone (superseded in the eighteenth round: a "please/now/ok" prefix makes any continuation a cue again); three regression tests that stayed green with their fix reverted now fail.
+- Seventh and eighth rounds: the deterministic floor's windows advance by the classifier stride, so any two terms up to 3,800 chars apart share a window wherever they sit; the crisis exemption is the "jumping off point" idiom only, as whole words, mirrored into the portal's copy of the list. **The deterministic operational rules are role-aware:** a user turn is a request and gets them; an assistant turn is the worker's own prior output and does not (clinical rules, the semantic classifier and the keyword net still run on every turn) — measured, the operational rules (write/add/fix × auth/token/session × verify/handler) describe ordinary code and refused half of this repo's files and the worker's own code answers when re-sent as history. The non-operational artifact exemption is decided over the whole turn, so a window that lost its "test fixture" context cannot out-rank its turn. (Superseded in the tenth round: decided per proximity slice.)
+- Ninth round, measured live against the real classifier through the real handler: screened turn by turn, the 4b refused 4 of 12 benign follow-ups from the benchmark (2 UNCERTAIN on context-free snippets such as "Which ticket is this bug filed under?", 2 false RESERVED on "We deploy to eu-west-3" and "Steps: plan, build, test, deploy"), and neither the benchmark nor the live suite had exercised that path. The semantic screen now runs over 3,600-char windows of the role-labelled transcript with the current prompt as the last user turn, so every window carries its context: 0 of 12 refused live. Windows are aligned from the start, so a follow-up re-uses the cached verdicts of every window but the last; a single-turn call is the exact classifier call it always was. (Superseded: from the twelfth round the transcript is a raise-only context layer; from the twenty-second, the one context read is the prompt's own window.) The per-turn role-aware deterministic floor, the crisis intercept per user turn and the keyword net are unchanged.
+- Tenth round: the artifact exemption is scoped to the 7,200-char proximity slice (an exemption thousands of chars away from a trigger is not the same clause); the crisis exemption is the idiom as a noun phrase only (a determiner + "jump(ing) off point(s)"), so "I plan to jump off point of the roof" intercepts again, mirrored into the portal; the bare "continue" cue is anchored on both branches, so "Please continue integration tests for the parser" is standalone like its unprefixed form; tests pin a middle-window ERROR followed by a reserved window, no reuse of a no-image verdict for an image call, and that roles come from the message field rather than from "Assistant:" text. Documented trade-off: the deterministic operational rules trust the host's role labels; the semantic classifier reads every window regardless.
+- Eleventh round: the crisis pattern reads the hyphenated spelling too ("jump-off the roof" intercepts, "a jumping-off point" is exempt), mirrored into the portal; "Now, continue." is a follow-up cue; the middle-window ERROR test proves the window is classified again on the next call.
+- Twelfth round (the verifier's blocker): the transcript-window screen let a classifier-directed note in a LATER prompt clear a reserved earlier turn — measured, the 9b then served a self-injury protocol the previous commit refused; the same note inside the turn or in a single prompt did not fool the classifier, so per-turn isolation is a real property. The screen is now three layers: the deterministic floor per turn; each turn classified ALONE, where OBVIOUS_RESERVED is final; then the transcript in context, which can only raise. The clinical self-injury rule now reads "bites his own arm" (the payload's wording) deterministically. Live end-to-end through the handler with the real classifier: 10 of 13 benchmark follow-ups served locally (the three refusals are the classifier's own reserved categories: an auth-middleware answer and two deploy-related snippets), and all four injection variants refused. Also: "Now,continue" is a cue; the description says entitlement-resolved results report `multi_turn`. (Superseded: the context layer became per-turn windows in the eighteenth round and raise-only reads in the twenty-second.)
+- Thirteenth round: an ERROR from a turn read alone is kept (the single-prompt ERROR path: cloud when it answers, else the keyword net decides, as before); only UNCERTAIN alone defers to context — a documented policy change: a turn UNCERTAIN alone but clean in context is served, where any UNCERTAIN used to refuse. With history the current prompt is capped at 128,000 chars structurally, so the transcript screen has a hard ceiling of classifier work. (Superseded in the twenty-second round: an UNCERTAIN read alone no longer defers to context.)
+- Fourteenth and fifteenth rounds: the history screen has an aggregate classifier-call budget as a safety net at the structural maximum (170 uncached calls per request; every shape the plan caps allow fits under it, so a paid call never trips it), beyond which it fails closed as UNCERTAIN with the attempt named (text calls; a call with an image keeps the image policy); and a consecutive-ERROR breaker: after three uncached windows in a row answer ERROR (a dead or stalled classifier), the rest are UNCERTAIN without a call — fail-closed: cloud when the plan allows it, else refused — instead of minutes of timeouts; marking them ERROR would have handed windows the classifier never read to the regex-only keyword net (sixteenth round). An explicit empty `messages: []` is single-turn for the prompt cap too.
+- Eighteenth round (the verifier's retry): the context layer reads one window per turn, the transcript's tail ending at that turn, instead of start-aligned windows over the whole transcript, so a note in the current prompt can never be part of an earlier turn's context read (the UNCERTAIN whitewash it measured is closed), and evicting the oldest turn at the plan cap invalidates one or two windows for turns as long as the measured fixture's (~2,900 chars) instead of every one (measured before: 26 uncached calls, 13.6 s per follow-up at cap); short turns shift every window that held the evicted turn — all of them while the whole transcript fits in one window. A reserved verdict on the worker's own ASSISTANT turn read alone now floors at UNCERTAIN (cloud when allowed, else refused; never lowered by context) instead of a final refusal that broke ordinary coding conversations (10 of 13 served, versus 12 of 13 before the isolation layer). A budget or breaker trip is merged fail-closed whatever the cache held. The prompt's deterministic floor runs in proximity slices like a turn. The "please/now/ok, continue …" cues are back (they had been narrowed away; "Continue integration tests …" without a prefix stays standalone). The crisis pattern is now the private repo's pattern manifest entry (a bounded lookbehind, so the Swift copy compiles); its generator output still drifts from the hand-maintained portal copy in other patterns, which is pre-existing and reported, not fixed here. (Superseded in the twenty-second round: the per-turn context windows and the assistant-turn floor are gone; every isolated verdict is kept.)
+- Nineteenth round: the prompt-alone classifier call no longer runs the classifier's own whole-prompt deterministic pass (it undid the proximity slicing: words 14k chars apart fired one rule); the routine fast path is kept explicitly — a prompt every slice of which the rules call routine, with no images, skips the model. An UNCERTAIN read of a long turn's head is kept fail-closed, since only the turn's last window is inside its context read. The UNCERTAIN-defers-to-context policy has a measured, narrow residual involving content the classifier finds only UNCERTAIN alone; per the project's disclosure rule the detail is kept in the private repo. Later text can never affect an earlier turn's read. (The residual named here is closed in the twenty-second round: no isolated UNCERTAIN defers to context any more.)
+- Twentieth round: the explicit routine fast path applies only to prompts of at most 4,000 chars, the entry point's own boundary; a longer routine-shaped prompt always reaches the entry point, whose full-text keyword floor must run (the previous round's fast path skipped it for oversize prompts).
+- Twenty-second round (two verifier reports): every verdict from a turn read alone is now kept — OBVIOUS_RESERVED final, UNCERTAIN fail-closed (cloud when the plan allows it, else refused; with an image, the image policy), ERROR on the single-prompt error path as before — and a context read can raise the verdict but never clear one. Four shapes of "an UNCERTAIN read alone defers to context" were each measured bypassable by a classifier-directed note in whichever window decided; there is no window a caller can shape that is safe to make the adjudicator. The assistant-turn UNCERTAIN floor (which changed no outcome downstream and cost extra calls) is gone with them. (This round also cut the context reads to the prompt's own window; the twenty-third restored them.) Live counts on the benchmark are reported in the PR. The budget/breaker trip merge is now pinned by a test. Public text that quoted the exact wording of a closed injection now describes the class.
+- Twenty-third round (verifier and Codex on the twenty-second): cutting the context reads to the prompt's own window left everything earlier than its last 3,600 chars unscreened for intent spread across turns — measured live, the two halves of a restraint request in separate user turns, clean apart, reserved together, followed by four benign turns, were served where the previous head refused. The per-turn context windows are back as raise-only reads (they were removed for cost, not safety: nothing defers to them any more, so they cannot reopen the whitewash), skipped once the verdict is already uncertain or reserved (and the isolated reads are skipped once the deterministic floor has refused); the structural maximum is 137 calls again. The consecutive-ERROR breaker now trips on the read that reaches the threshold, not only before the next one: a third ERROR on the last read left the aggregate on the ERROR path. With the context windows back, even a one-turn history makes three screen reads, so a classifier that is down now trips the breaker on the smallest conversation and refuses (cloud when allowed) instead of falling to the keyword net as the twenty-second round did. The overview's claim that a reserved phrase in the model's own answer is handled exactly as in a single prompt was false for the operational rules (user turns only) and is corrected; the isolated windows' 200-char overlap is stated next to the claim it bounds.
+
+### Fixed
+
+- Handoff history snapshots now retain the effective role and active branch,
+  and save responses distinguish a durable primary handoff from a failed
+  optional time-travel snapshot.
+
 ### The MCP registry listing can actually publish
 
 `registry-publish.yml` ran on any push to main touching `server.json`, which
@@ -1209,13 +1360,6 @@ search result. Upgrade if you use Web Scholar at all.
   queries (TPNs, function names) that embeddings blur. Results state how they
   were found (`hybrid retrieval`, per-hit `sem#/lex#`, `exact-term match`).
   Local SQLite installs keep pure vector search.
-
-## [Unreleased]
-
-### Fixed
-- Handoff history snapshots now retain the effective role and active branch,
-  and save responses distinguish a durable primary handoff from a failed
-  optional time-travel snapshot.
 
 ## [20.2.9] - 2026-07-26 — Reliable Releases and Sessions
 

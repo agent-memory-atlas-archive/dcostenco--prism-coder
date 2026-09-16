@@ -15,6 +15,42 @@ import { debugLog } from "./logger.js";
 
 // ── Types ─────────────────────────────────────────────────────────
 
+/** prism_infer multi-turn policy. Ruled by the PORTAL's plan table
+ *  (portal/src/app/api/v1/prism/entitlements/route.ts): Prism is a thin
+ *  client and never decides this itself. Absent from an older portal →
+ *  DEFAULT_MULTI_TURN; wild values are clamped to the absolute ceiling. */
+export interface MultiTurnEntitlement {
+    enabled: boolean;
+    max_turns: number;
+    max_chars: number;
+}
+
+/** What a host with NO portal (unconfigured), a portal that says nothing
+ *  (older deployment), or an assumed-free fallback gets: OFF. Multi-turn is
+ *  a paid-plan feature (owner decision 2026-09-15); a client default that
+ *  enabled it would hand a paid feature to anyone without an account. The
+ *  caps here are what a paid plan gets when the portal omits them. */
+export const DEFAULT_MULTI_TURN: MultiTurnEntitlement = { enabled: false, max_turns: 12, max_chars: 32_000 };
+/** Structural ceiling no plan can exceed: the portal's own inference route
+ *  takes at most 50 messages INCLUDING the current turn appended on
+ *  escalation, hence 49 prior turns; 128k chars ≈ 32k tokens — the largest
+ *  local window. Above this the payload is malformed, not merely over plan. */
+export const ABSOLUTE_MULTI_TURN: MultiTurnEntitlement = { enabled: true, max_turns: 49, max_chars: 128_000 };
+
+/** The policy prism_infer enforces for these entitlements: portal values
+ *  when present, clamped into the absolute ceiling; the default otherwise. */
+export function multiTurnPolicy(ent: PrismEntitlements): MultiTurnEntitlement {
+    const raw = ent.multi_turn;
+    if (!raw || typeof raw !== "object") return DEFAULT_MULTI_TURN;
+    const clampInt = (v: unknown, fallback: number, max: number): number =>
+        typeof v === "number" && Number.isFinite(v) && v >= 0 ? Math.min(Math.floor(v), max) : fallback;
+    return {
+        enabled: typeof raw.enabled === "boolean" ? raw.enabled : DEFAULT_MULTI_TURN.enabled,
+        max_turns: clampInt(raw.max_turns, DEFAULT_MULTI_TURN.max_turns, ABSOLUTE_MULTI_TURN.max_turns),
+        max_chars: clampInt(raw.max_chars, DEFAULT_MULTI_TURN.max_chars, ABSOLUTE_MULTI_TURN.max_chars),
+    };
+}
+
 export interface PrismEntitlements {
     plan: string;
     model_ceiling: "2b" | "4b" | "9b" | "27b";
@@ -31,6 +67,8 @@ export interface PrismEntitlements {
         analytics_dashboard: boolean;
     };
     upgrade_url: string;
+    /** Multi-turn policy from the portal's plan table; see multiTurnPolicy(). */
+    multi_turn?: MultiTurnEntitlement;
     /** §5.5 — provenance of these values. Distinguishes "the portal says
      *  free" from "we ASSUMED free because resolution failed":
      *  - "portal": real portal data (fresh, cached, or last-known-good)
@@ -254,6 +292,15 @@ export async function getEntitlements(): Promise<PrismEntitlements> {
 /**
  * Force cache invalidation (e.g. after plan upgrade).
  */
+/** Cached entitlements WITHOUT a network round-trip, or null when cold.
+ *  For display surfaces (the startup line) that must never add a portal
+ *  fetch to startup; the first prism_infer result carries the policy anyway. */
+export function peekEntitlements(): PrismEntitlements | null {
+    // Honour the TTL: a stale plan's caps must not be advertised at startup
+    // (review 2026-09-16); an expired cache reads as cold.
+    return cache && cache.expiresAt > Date.now() ? cache.entitlements : null;
+}
+
 export function invalidateEntitlements(): void {
     cache = null;
     negativeCache = null;

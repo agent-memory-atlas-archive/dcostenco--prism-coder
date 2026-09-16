@@ -371,3 +371,70 @@ describe("computeRoute scope influence", () => {
     expect(result.complexity_score).toBeLessThanOrEqual(8);
   });
 });
+
+// ── Follow-up detection: the router cannot attach turns, but it can say they are needed ──
+
+import { looksLikeFollowUp } from "../../src/tools/taskRouterHandler.js";
+
+describe("needs_history — follow-up cues", () => {
+  it.each([
+    "now make it return the insertion point when the value is absent",
+    "also add a unit test for the same function",
+    "use the same approach as before for the config loader",
+    "your previous answer missed the null case; fix that",
+    "continue from where you stopped in the parser",
+    "as we discussed, rename the helper and re-export it",
+    "continue",
+    "please continue",
+    "ok, keep going",
+    "redo that with the flag off",
+    "do it again but for the EU region",
+    "Continue?",
+    "now continue",
+    "Now, continue.",
+    "Now,continue",
+    "Now continue the migration",
+    "Please continue the migration",
+    "ok, continue the migration",
+    "Please continue integration tests for the parser module", // a prefix makes it continuation
+  ])("flags a follow-up: %s", (desc) => {
+    expect(looksLikeFollowUp(desc)).toBe(true);
+  });
+
+  it.each([
+    "create file for the new template stub",
+    "fix typo in the config file, simple change",
+    "fix it so the loader handles empty input",           // bare pronoun is not a cue
+    "write a Dockerfile for a Node.js app",
+    "what changed between these two versions",
+    // review 2026-09-16: a leading connective alone was enough — it is not
+    "Next.js 15 app router migration plan",
+    "Also fix the typo in README",
+    "Then run the migration script on staging",
+    "Again and again the test flakes — find the root cause",
+    "Now write a unit test for parseDate()",
+    "Restore the last version of the file from git",
+    // round 3 verification: the bare-verb cues must not match a verb that
+    // merely starts a standalone task
+    "Go on-call rotation doc for the SRE team",
+    "Continue integration tests for the parser module",
+    "Repeat this SQL for the EU project",
+  ])("does not flag a standalone task: %s", (desc) => {
+    expect(looksLikeFollowUp(desc)).toBe(false);
+  });
+
+  it("a claw route for a follow-up carries needs_history and says so in the rationale", () => {
+    const r = computeRoute({
+      task_description: "now add the same null guard to the config loader, simple change",
+      files_involved: ["src/config.ts"],
+      estimated_scope: "minor_edit",
+    });
+    expect(r.needs_history).toBe(true);
+    expect(r.rationale).toMatch(/follow-up.*`messages`/);
+  });
+
+  it("a standalone task carries needs_history=false, including the early host return for a too-short description", () => {
+    expect(computeRoute({ task_description: "create file for the new template stub", files_involved: ["src/t.ts"], estimated_scope: "minor_edit" }).needs_history).toBe(false);
+    expect(computeRoute({ task_description: "hi", files_involved: [], estimated_scope: "minor_edit" }).needs_history).toBe(false);
+  });
+});

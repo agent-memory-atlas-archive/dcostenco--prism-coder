@@ -4,22 +4,34 @@
  * Calls dcostenco/prism-coder:4b via Ollama to classify whether
  * a prompt is OBVIOUS_RESERVED, OBVIOUS_NOT_RESERVED, or UNCERTAIN.
  *
- * Fail-closed contract:
+ * Contract (as the handler applies it):
  *   OBVIOUS_NOT_RESERVED → permits local routing
- *   OBVIOUS_RESERVED     → escalate to cloud
- *   UNCERTAIN            → escalate to cloud (conservative)
+ *   OBVIOUS_RESERVED     → text: cloud when allowed, else refused; with a
+ *                          current image: local only, never cloud (ruling
+ *                          2026-08-18, clinical images are processed)
+ *   UNCERTAIN            → the same as OBVIOUS_RESERVED (conservative)
  *   UNCERTAIN_LENGTH     → §5.3: prompt too long to classify in full, but the
- *                          full-text keyword floor is clean AND a head+tail
+ *                          full-text keyword floor is clean AND a head+middle+tail
  *                          excerpt classified clean — permits local routing
  *                          with a distinct audit marker ("too long to classify"
  *                          ≠ "semantically uncertain")
- *   ERROR                → escalate to cloud (never fail-open)
+ *   ERROR                → cloud when it is allowed and answers; otherwise
+ *                          the full-text keyword net decides and keyword-
+ *                          clean text is served locally (the one path that
+ *                          is not fail-closed: an availability policy; on a
+ *                          history screen three in a row become UNCERTAIN;
+ *                          with a current image callLayer1 maps ERROR to
+ *                          UNCERTAIN and the handler refuses one that
+ *                          reaches it, so an image ERROR is never served)
  *
  * The prompt below is VERBATIM from §E of prism-infer-boundaries/SKILL.md.
  * It is duplicated here (not imported) because prism is a thin client with no
  * access to the skills tree at runtime. A drift test asserts byte-for-byte match.
  *
- * Must not run when mode="route" and max_tokens<=16 — that IS a Layer 1 call.
+ * callLayer1 talks to Ollama directly and never re-enters prism_infer, so
+ * there is no call signature that must skip it (the old "mode=route +
+ * max_tokens<=16" skip was removed 2026-09-16: it was a caller-controlled
+ * bypass, never a recursion guard).
  */
 
 export type Layer1Verdict =
@@ -93,7 +105,7 @@ const CLINICAL_RESERVED_RULES: readonly IntentRule[] = [
         has(/\b(?:draft|write|document|procedure|protocol|use|implement|instruct\w*)\b/i),
     ),
     all(
-        has(/\b(?:self[- ]?(?:harm|injur\w*)|bites?\s+(?:him|her|them)self|scratches?\s+(?:him|her|them)self|bangs?\s+(?:his|her|their)\s+head|harm\s+(?:himself|herself|themselves))\b/i),
+        has(/\b(?:self[- ]?(?:harm|injur\w*)|bites?\s+(?:him|her|them)self|bites?\s+(?:his|her|their)\s+own\b|scratches?\s+(?:him|her|them)self|scratches?\s+(?:his|her|their)\s+own\b|bangs?\s+(?:his|her|their)\s+head|harm\s+(?:himself|herself|themselves))\b/i),
         has(/\b(?:bleed\w*|blood|concrete|head\s+impact|medical\s+attention|risk(?:\s+of\s+injury)?|causes?\s+injury|actual\s+injury|assess\w*|screen\w*|want\w*)\b/i),
     ),
     (prompt) => (
@@ -265,7 +277,23 @@ const NON_OPERATIONAL_ARTIFACT_ACTION =
  * clear routine BCBA work reaches local inference. Ambiguous prompts return
  * null and continue to the semantic classifier below.
  */
-export function classifyDeterministicLayer1(userPrompt: string): Layer1Verdict | null {
+/** The non-operational artifact exemption over a text. classifyDeterministic
+ *  Layer1 applies it to the text it is given; prism_infer's history screen
+ *  passes 7,200-char proximity slices, so the exemption reaches the clause it
+ *  sits in and nothing thousands of chars away (review rounds 4 and 10). */
+export function isNonOperationalArtifact(text: string): boolean {
+    return NON_OPERATIONAL_ARTIFACT_CONTEXT.test(text) && NON_OPERATIONAL_ARTIFACT_ACTION.test(text);
+}
+
+export interface DeterministicLayer1Options {
+    /** false = skip the operational (auth code, auth bypass, ship/deploy, PHI
+     *  exposure) rules. They classify a REQUEST; a prior assistant turn is the
+     *  worker's own output, and ordinary code matches them by description
+     *  (half of this repo's files, measured 2026-09-16). Clinical rules always run. */
+    operational?: boolean;
+}
+
+export function classifyDeterministicLayer1(userPrompt: string, opts?: DeterministicLayer1Options): Layer1Verdict | null {
     // The artifact exemption is checked BEFORE the reserved rules, and only for
     // the non-clinical ones.
     //
@@ -282,10 +310,10 @@ export function classifyDeterministicLayer1(userPrompt: string): Layer1Verdict |
     // closed first, before anything can exempt it.
     const clinicalReserved = matchesAny(userPrompt, CLINICAL_RESERVED_RULES);
     if (clinicalReserved) return "OBVIOUS_RESERVED";
-    if (
-        NON_OPERATIONAL_ARTIFACT_CONTEXT.test(userPrompt) &&
-        NON_OPERATIONAL_ARTIFACT_ACTION.test(userPrompt)
-    ) {
+    if (opts?.operational === false) {
+        return matchesAny(userPrompt, ROUTINE_BCBA_INTENT_RULES) ? "OBVIOUS_NOT_RESERVED" : null;
+    }
+    if (isNonOperationalArtifact(userPrompt)) {
         return "OBVIOUS_NOT_RESERVED";
     }
     if (matchesAny(userPrompt, RESERVED_INTENT_RULES)) return "OBVIOUS_RESERVED";
@@ -377,10 +405,11 @@ const LAYER1_RETRY_TIMEOUT_MS = 5_000;
 const RESERVED_KEYWORDS = /\b(restrain\w*|seclu(?:sion|d\w*)|physical\s*holds?|(?:prone|supine|basket|therapeutic|manual|two[- ]?person)\s+holds?|hold(?:ing)?\s+(?:the\s+)?(?:client|child|student|patient)\s+down|containment|self[- ]?harm\w*|suicid\w*|overdos\w*|dos(?:age|ing)\s*(?:mg|schedule)|crisis\s*de[- ]?escalation|meltdown\s*management|rage\s+episode|elopement\s*incident)\b/i;
 
 /**
- * Deterministic keyword check — the ERROR-path floor.
+ * Deterministic keyword check — the ERROR-path floor, and the full-text
+ * floor for oversize input (over MAX_CLASSIFIER_PROMPT_LENGTH the classifier
+ * reads an excerpt, so this runs over the whole text first).
  * Returns OBVIOUS_RESERVED if reserved vocabulary is present,
- * OBVIOUS_NOT_RESERVED otherwise. Used only when the LLM classifier
- * fails (timeout, model not loaded, injection attack).
+ * OBVIOUS_NOT_RESERVED otherwise.
  */
 export function keywordBackstop(prompt: string): Layer1Verdict {
     return RESERVED_KEYWORDS.test(prompt) ? "OBVIOUS_RESERVED" : "OBVIOUS_NOT_RESERVED";
@@ -393,7 +422,7 @@ export function keywordBackstop(prompt: string): Layer1Verdict {
 // bounded head+tail excerpt. A clean floor + clean excerpt yields the
 // distinct UNCERTAIN_LENGTH verdict so callers can tell "too long to
 // classify" from "semantically uncertain".
-const MAX_CLASSIFIER_PROMPT_LENGTH = 4_000;
+export const MAX_CLASSIFIER_PROMPT_LENGTH = 4_000;
 // Excerpt budget: head + middle + tail must stay under the classifier cap
 // with room for the LAYER1_PROMPT template. The sampled middle window
 // narrows the region an attacker can hide paraphrased reserved content in
@@ -440,12 +469,20 @@ export async function callLayer1(
      *  screenshot of clinical material would otherwise pass a gate that only
      *  ever read the text prompt. */
     images?: string[],
+    opts?: {
+        /** false = the caller already ran the deterministic floor itself — per
+         *  turn with role context for history windows, and in proximity slices
+         *  for the current prompt — so this whole-text pass must not re-run
+         *  (see prismInferHandler's history screen). The oversize keyword
+         *  floor below is NOT gated by this and still runs. */
+        deterministic?: boolean;
+    },
 ): Promise<Layer1Verdict> {
     if (!userPrompt || !userPrompt.trim()) return "ERROR";
 
     const oversize = userPrompt.length > MAX_CLASSIFIER_PROMPT_LENGTH;
     const hasImages = !!images?.length;
-    const deterministic = classifyDeterministicLayer1(userPrompt);
+    const deterministic = opts?.deterministic === false ? null : classifyDeterministicLayer1(userPrompt);
     if (deterministic === "OBVIOUS_RESERVED") return deterministic;
     // The routine-work fast path may only skip the model when there is nothing
     // to look at. It reads the PROMPT, so with an image attached it is a free

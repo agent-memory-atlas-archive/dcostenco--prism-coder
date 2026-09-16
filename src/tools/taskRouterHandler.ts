@@ -41,6 +41,11 @@ export interface TaskRouteResult {
   confidence: number;
   complexity_score: number;
   rationale: string;
+  /** The task reads as a FOLLOW-UP to earlier work ("now…", "the same…",
+   *  "your previous answer"). The router holds no turns, so it cannot attach
+   *  them; the host must pass the accepted prior turns as `messages` (paid
+   *  plans) or the local worker answers from nothing and fabricates. */
+  needs_history: boolean;
   recommended_tool: string | null;
   recommended_args?: {
     prompt: string;
@@ -351,6 +356,49 @@ const WEIGHTS = {
  * memory size, installed models, live RAM, entitlements, and explicit caller
  * overrides.
  */
+/**
+ * Follow-up cues. Deliberately narrow: leading connectives and explicit
+ * references to prior work. Bare pronouns ("fix it") are NOT cues — "fix
+ * the typo in it" is a normal standalone task and a false positive here
+ * would make the host attach history to everything.
+ */
+const FOLLOW_UP_CUES: readonly RegExp[] = [
+  /^\s*(same as before|as before|like before)\b/i,
+  // "last" dropped: "restore the last version of the file from git" is a
+  // standalone task (review 2026-09-16).
+  /\b(the|that) (same|previous|earlier) (one|version|function|file|answer|approach|code|result|output|draft)\b/i,
+  /\byour (last|previous|earlier) (answer|version|output|draft|reply)\b/i,
+  /\b(as|what) (we|you) (just |already )?(did|discussed|agreed|wrote|said|made|decided)\b/i,
+  /\b(from|like) (before|last time|earlier)\b/i,
+  /\b(continue|carry on|keep going|pick up) (from )?(where|what)\b/i,
+  // A bare "continue" / "please continue" / "keep going" is a follow-up by
+  // definition (review 2026-09-16).
+  // The bare verb, optionally "from/where/with …", and nothing else:
+  // "Continue integration tests for the parser" and "Go on-call rotation
+  // doc" are standalone tasks (review round 3).
+  // "please/now/ok, continue <anything>" is conversational continuation
+  // (so "Please continue integration tests for the parser" IS a cue — the
+  // prefix is the signal, accepted false positives included); the bare verb
+  // counts only as the whole message (or "from/where/with…"), so "Continue
+  // integration tests for the parser" stays standalone (review rounds 3–18:
+  // the prefixed forms were dropped once and restored).
+  /^\s*(please|ok|now)(,\s*|\s+)(continue|carry on|keep going|go on)\b/i,
+  /^\s*(continue|carry on|keep going|go on)(\s+(from|where|with)\b.*)?\s*[.!?]?\s*$/i,
+  /\b(redo|repeat) (it|that)\b|\bdo (it|that) again\b/i,
+];
+
+/** A leading connective alone is not a cue: "Next.js 15 migration plan",
+ *  "Also fix the typo in README", "Now write a unit test for parseDate()" are
+ *  standalone tasks (review 2026-09-16). It counts only with an anaphor that
+ *  points at prior work. */
+const LEADING_CONNECTIVE = /^\s*(now|also|then|next|again|and now|and then|after that)\b/i;
+const ANAPHOR = /\b(it|that|this|those|these|them|the same)\b|\b(as|like) before\b/i;
+
+export function looksLikeFollowUp(description: string): boolean {
+  if (FOLLOW_UP_CUES.some((r) => r.test(description))) return true;
+  return LEADING_CONNECTIVE.test(description) && ANAPHOR.test(description);
+}
+
 function buildRecommendedArgs(
   args: SessionTaskRouteArgs,
   complexityScore: number,
@@ -378,6 +426,7 @@ export function computeRoute(args: SessionTaskRouteArgs): TaskRouteResult {
     return {
       target: "host",
       confidence: 0.5,
+      needs_history: false,
       complexity_score: 5,
       rationale: "Insufficient information for confident routing. Defaulting to host model.",
       recommended_tool: null,
@@ -448,6 +497,9 @@ export function computeRoute(args: SessionTaskRouteArgs): TaskRouteResult {
     signals.push(`host boundary: ${delegability.reasons.join(", ")}`);
   }
 
+  const needs_history = looksLikeFollowUp(task_description);
+  if (needs_history) signals.push("follow-up to earlier work: pass the accepted prior turns as `messages`");
+
   const rationale = target === "claw"
     ? `Task is delegable to the local agent. Signals: ${signals.join("; ") || "neutral"}.`
     : `Task should remain with the host model. Signals: ${signals.join("; ") || "neutral"}.`;
@@ -457,6 +509,7 @@ export function computeRoute(args: SessionTaskRouteArgs): TaskRouteResult {
     confidence,
     complexity_score,
     rationale,
+    needs_history,
     recommended_tool: target === "claw" ? "prism_infer" : null,
     ...(target === "claw" ? {
       recommended_args: buildRecommendedArgs(args, complexity_score),
@@ -504,6 +557,7 @@ export async function sessionTaskRouteHandler(
           complexity_score: 5,
           rationale: "Local delegation was explicitly disabled in Prism settings.",
           recommended_tool: null,
+          needs_history: false,
           delegation_enabled: false,
         }),
       }],

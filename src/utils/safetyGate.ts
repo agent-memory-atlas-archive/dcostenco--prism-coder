@@ -22,7 +22,17 @@ const CRISIS_INPUT_RE = [
     /want\s+to\s+(?:commit\s+)?suicide/i,
     /cut(?:ting)?\s+(?:my)?self/i,
     /(?:hang|hanging)\s+(?:my)?self/i,
-    /jump(?:ing)?\s+off/i,
+    // "a jumping off point for the refactor" is engineering, not a disclosure
+    // (measured false positive, review round 3, 2026-09-16). Exempt ONLY the
+    // idiom as a noun phrase: a determiner + "jump(ing) off point(s)" ("a
+    // jumping off point for the refactor", "good jumping off points"). "I
+    // plan to jump off point of the roof" has no determiner and matches;
+    // "jumping off pointlessly", "jumping off a bridge" and the hyphenated
+    // "jump-off the roof" match; "a jumping-off point" is exempt. Source of
+    // truth: the private repo's safety/patterns.json (bounded lookbehind for the
+    // Swift copy); the generator's other patterns drift from this file —
+    // reported; apply single lines, and keep the portal copy in step.
+    /(?:(?<!\b(?:a|an|the|this|that|good|great|solid|useful|our|your|my|as)\s{1,4})\bjump(?:ing)?[\s-]+off\b|\bjump(?:ing)?[\s-]+off\b(?![\s-]+points?\b))/i,
     /how\s+(?:many|much|to).*(?:pills|overdose|die)/i,
     // Spanish — block hyperbole nouns only (NOT hunger/thirst/cold — may be literal for neglected child)
     /quiero\s+morir(?!\s+de\s+(?:risa|la\s+risa|vergüenza|ganas|envidia|aburrimiento)\b)/i,

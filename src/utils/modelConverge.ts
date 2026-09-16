@@ -41,9 +41,19 @@ export interface TagInfo {
     digest: string;
 }
 
+/** What /api/show says about a tag: the weights blob it is built FROM and
+ *  whether a local Modelfile pinned num_ctx on it (scripts/*.Modelfile). */
+export interface TagFacts {
+    weightsBlob: string;
+    pinnedNumCtx: number | null;
+}
+
 export interface ModelConvergeDeps {
     /** GET <ollamaUrl>/api/tags → installed models with digests. Throws when unreachable. */
     listTags: () => Promise<TagInfo[]>;
+    /** POST <ollamaUrl>/api/show → weights blob + num_ctx pin. Null when unknown.
+     *  Optional: without it staleness falls back to the digest comparison. */
+    tagFacts?: (name: string) => Promise<TagFacts | null>;
     /** `ollama pull <ref>` — throws on failure. */
     pull: (ref: string) => Promise<void>;
     /** `ollama cp <from> <to>` — throws on failure. */
@@ -56,6 +66,13 @@ export interface TierOutcome {
     tier: string;
     action: "pulled_and_aliased" | "aliased_only" | "up_to_date" | "skipped_not_installed" | "failed";
     detail?: string;
+}
+
+/** Exit rule for the standalone command: one installed tier that did not
+ *  converge is a failure worth a non-zero exit, not only "every tier failed"
+ *  (a one-tier host reports three skipped_not_installed and would exit 0). */
+export function convergeFailed(outcomes: ReadonlyArray<{ action: string }>): boolean {
+    return outcomes.some(o => o.action === "failed");
 }
 
 export async function convergeModels(deps: ModelConvergeDeps): Promise<TierOutcome[]> {
@@ -106,10 +123,47 @@ export async function convergeModels(deps: ModelConvergeDeps): Promise<TierOutco
             }
 
             const pulledNewBytes = digestBefore !== undefined && digestBefore !== sourceNow.digest;
-            const aliasStale = !aliasNow || aliasNow.digest !== sourceNow.digest;
+            let aliasStale = !aliasNow || aliasNow.digest !== sourceNow.digest;
 
-            if (aliasStale) {
+            // A digest mismatch is not always stale bytes. Adopting
+            // scripts/prism-coder-9b.Modelfile rebuilds the alias FROM the same
+            // weights with `PARAMETER num_ctx 32768`, which changes the manifest
+            // digest and nothing else — and this branch would have cp'd the
+            // unpinned upstream straight over it on the next converge, silently
+            // undoing the pin (found 2026-09-15 before it happened). Stale means
+            // OLD WEIGHTS: compare the blobs the two tags are built from.
+            let pinnedSameWeights = false;
+            let droppedPin: number | null = null;
+            if (aliasStale && aliasNow && deps.tagFacts) {
+                const [a, src] = await Promise.all([deps.tagFacts(alias), deps.tagFacts(source)]);
+                if (a && src) {
+                    if (a.weightsBlob === src.weightsBlob) {
+                        pinnedSameWeights = a.pinnedNumCtx !== null;
+                        aliasStale = false;
+                    } else if (a.pinnedNumCtx !== null) {
+                        droppedPin = a.pinnedNumCtx;
+                    }
+                } else {
+                    // /api/show failed or had no FROM line: a local pin cannot
+                    // be detected, so do NOT overwrite — a digest mismatch may
+                    // be nothing but the pin (review 2026-09-16). Hosts without
+                    // tagFacts (older callers) keep the digest rule.
+                    outcomes.push({ tier, action: "failed", detail: "tag_facts_unavailable_pin_unknown" });
+                    deps.log(`? ${alias}: /api/show facts unavailable — left alone (a local num_ctx pin cannot be told from stale weights). Re-run when Ollama answers /api/show, or rebuild deliberately with: ollama cp ${source} ${alias}`);
+                    continue;
+                }
+            }
+
+            if (pinnedSameWeights) {
+                outcomes.push({ tier, action: "up_to_date", detail: "locally_pinned" });
+                deps.log(`= ${alias} is a local pin on the same weights as ${source} — left alone`);
+            } else if (aliasStale) {
                 await deps.copy(source, alias);
+                if (droppedPin !== null) {
+                    outcomes.push({ tier, action: pulledNewBytes || !hadSource ? "pulled_and_aliased" : "aliased_only", detail: "pin_dropped_readopt" });
+                    deps.log(`⚠ ${alias} rebuilt on new weights; its num_ctx ${droppedPin} pin is GONE — re-adopt with: ollama create ${alias} -f scripts/${alias.replace(":", "-")}.Modelfile`);
+                    continue;
+                }
                 const action = pulledNewBytes || !hadSource ? "pulled_and_aliased" : "aliased_only";
                 outcomes.push({ tier, action });
                 deps.log(`✓ ${alias} ${aliasNow ? "re-aliased (was a stale snapshot)" : "aliased"} → ${sourceNow.digest.slice(0, 12)}`);
