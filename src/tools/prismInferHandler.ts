@@ -9,7 +9,7 @@
  *   1. Probe Ollama, list tags
  *   2. Pick largest viable local tier (pickLocalModel)
  *   3. Call /api/generate locally — return on success
- *   4. On local fail, if cloud_fallback=true:
+ *   4. On local fail, if the plan allows cloud (explicit cloud_fallback:false forbids it):
  *        - exchange synalux_sk_ → JWT (cached)
  *        - POST synalux portal /api/v1/prism/inference
  *        - portal serves Gemini 3.6 Flash according to the user's tier
@@ -298,6 +298,11 @@ async function classifyHistoryWindow(
     // and a classifier that keeps failing is not asked again this request.
     if (budget && budget.consecutiveErrors >= LAYER1_SCREEN_ERROR_BREAKER) { budget.tripped = true; return "UNCERTAIN"; }
     if (budget && ++budget.calls > LAYER1_SCREEN_CALL_BUDGET) { budget.tripped = true; return "UNCERTAIN"; }
+    // deterministic:false is deliberate for a JOINT window and must stay so:
+    // the co-occurrence rules see words from different turns as one clause
+    // (the 2026-09-16 field refusal's joined window fires them; every turn
+    // alone is clean). The rules run per turn in proximity slices upstream;
+    // here only the model reads, and only to RAISE.
     const verdict = await l1fn(window, ollamaUrl, model, undefined, undefined, { deterministic: false });
     if (budget) {
         budget.consecutiveErrors = verdict === "ERROR" ? budget.consecutiveErrors + 1 : 0;
@@ -431,7 +436,7 @@ export const PRISM_INFER_TOOL: Tool = {
         "the caller's `task_complexity`, then validates loaded memory size, model context, " +
         "entitlements, installed models, and free RAM at call time. " +
         "Falls through to the Synalux portal Gemini 3.6 Flash cloud fallback " +
-        "only when local is unviable AND `cloud_fallback=true`. " +
+        "only when local is unviable or refused and the plan allows cloud; `cloud_fallback: false` forbids it. " +
         "When `project` is provided, loads the dashboard-configured quick/standard/deep handoff and bounded history " +
         "as untrusted historical context for a memory-aware local worker. " +
         "Use this for code generation, summarisation, classification, or any synth task you would " +
@@ -521,8 +526,7 @@ export const PRISM_INFER_TOOL: Tool = {
             },
             cloud_fallback: {
                 type: "boolean",
-                description: "Fall through to the Synalux portal cascade on local failure. Default false: saving tokens is the point.",
-                default: false,
+                description: "Synalux portal cascade when local is unviable or refused. Omitted: the plan decides; false forbids it.",
             },
             timeout_ms: {
                 type: "number",
@@ -581,7 +585,7 @@ export const PRISM_INFER_TOOL: Tool = {
                 enum: ["auto", "local"],
                 description:
                     "'auto' (default): local advertised-tool contract plus, on paid plans, the private " +
-                    "Synalux deterministic route correction. 'local': prompt and draft stay on-device.",
+                    "Synalux deterministic route correction. 'local': skips that correction only.",
                 default: "auto",
             },
             think: {
@@ -655,7 +659,8 @@ export interface PrismInferArgs {
     mode?: "route" | "chat" | "code";
     /** Tool names actually advertised to the route model. */
     allowed_tools?: string[];
-    /** auto = local contract + subscribed portal correction; local = on-device contract only. */
+    /** auto = local contract + subscribed portal correction; local = skips that correction only
+     *  (cloud inference fallback and the grounding verifier are separate switches). */
     route_guard?: "auto" | "local";
     /** Enable thinking (<think> blocks). Default: true for chat/code, false for route. */
     think?: boolean;
@@ -1175,8 +1180,9 @@ export class ReservedRefusalError extends Error {
         const what = category ? `category="${category}"` : "matched the semantic classifier";
         const remedy = cloudWasAllowed
             ? "Cloud escalation was permitted and did not produce an answer; see attempts."
-            : "Reserved content is never answered by a local model. Pass cloud_fallback: true "
-              + "to escalate to a stronger model, or answer it in the host thread instead.";
+            : "Reserved content is never answered by a local model. This call had no cloud: either it "
+              + "passed cloud_fallback: false, or the plan has none. Pass cloud_fallback: true (or omit "
+              + "it, on a paid plan) to escalate to a stronger model, or answer it in the host thread instead.";
         super(
             `prism_infer: Layer 1 verdict=${verdict}, ${what} — reserved content refused. `
             + `${remedy} attempts=${JSON.stringify(attempts)}`,
@@ -1190,6 +1196,7 @@ function makeReservedRefusal(
     attempts: Array<{ tier: string; reason: string }>,
     category: string | null = null,
     cloudWasAllowed = false,
+    ledger: { history_turns?: number; refusal_layer?: string } = {},
 ): ReservedRefusalError {
     // Ledger the refusal (fire-and-forget). No prompt content is persisted —
     // same HIPAA posture as the safety_gate exclusion. gate_outcome mirrors
@@ -1198,6 +1205,8 @@ function makeReservedRefusal(
         backend: "refused", model: null, used_cloud: false,
         gate_outcome: "refused",
         refusal_reason: "layer1_reserved",
+        history_turns: ledger.history_turns,
+        refusal_layer: ledger.refusal_layer,
     });
     return new ReservedRefusalError(verdict, attempts, category, cloudWasAllowed);
 }
@@ -1424,6 +1433,9 @@ export interface PrismInferResult {
     multi_turn?: MultiTurnEntitlement;
     /** How many prior turns this call carried (a count, never content). */
     history_turns?: number;
+    /** Which screen layer decided the call: 'rules' | 'isolated' | 'prompt' |
+     *  'context' | 'budget' | 'backstop'. Absent when nothing raised the verdict. */
+    refusal_layer?: string;
     /** Actual token counts from Ollama, or char/4 estimates for cloud. */
     prompt_tokens?: number;
     completion_tokens?: number;
@@ -1650,10 +1662,25 @@ export async function runInfer(args: PrismInferArgs, deps: InferDeps): Promise<P
     // specific backend.
     const maxTokens = cloudMaxTokens;
 
-    // Cloud fallback only for paid plans
+    // Cloud fallback is the PLAN's to give. An omitted flag means "whatever my
+    // plan entitles me to": paid plans escalate, free plans do not. Explicit
+    // false still forbids cloud INFERENCE fallback — the clinical delegation
+    // rules and token-saving callers depend on that; the route guard and the
+    // grounding verifier keep their own switches (route_guard, verify) — and
+    // explicit true still needs a
+    // plan with cloud. Until 2026-09-16 an omitted flag meant "no cloud", so a
+    // paid, portal-ruled entitlement sat unused and an UNCERTAIN verdict
+    // dead-ended instead of escalating; measured in production the day
+    // multi-turn shipped, on a host that simply did not pass the argument.
     // let, not const: the reserved-image branch pins this off mid-call so no
     // later escalation path can carry even the prompt text off-device.
-    let allowCloud = args.cloud_fallback === true && ent.features.cloud_fallback;
+    // The default is image-aware: cloud can never serve an image request
+    // (screenshots stay on this device), so defaulting it ON for one would only
+    // convert a gate-failed-but-usable local answer into a hard failure — an
+    // explicit request still behaves as before and is refused at the point of
+    // use with its attempt named.
+    const planDefault = ent.features.cloud_fallback && !(args.images?.length);
+    let allowCloud = (args.cloud_fallback ?? planDefault) && ent.features.cloud_fallback;
 
     // Verification only for paid plans (free users skip L3 grounding)
     const canVerify = ent.features.grounding_verifier;
@@ -1692,6 +1719,19 @@ export async function runInfer(args: PrismInferArgs, deps: InferDeps): Promise<P
         multi_turn: multiTurnPolicy(ent),
         history_turns: args.messages?.length ?? 0,
     } as const;
+    // Which screen layer decided the call; ledgered on a refusal. Bookkeeping
+    // only: raise() is worseLayer1Verdict with a label and the assignment stays
+    // at the call site, so it changes no outcome. Declared here because
+    // refusedResult() can run before the Layer 1 block. Without it, "which
+    // layer refused this" needs a transcript replay — exactly what a benign
+    // production refusal cost on 2026-09-16.
+    let l1Layer: string | null = null;
+    const ledgerMeta = () => ({ history_turns: args.messages?.length ?? 0, refusal_layer: l1Layer ?? undefined });
+    const raise = (cur: Layer1Verdict, next: Layer1Verdict, source: string): Layer1Verdict => {
+        const merged = worseLayer1Verdict(cur, next);
+        if (merged !== cur) l1Layer = source;
+        return merged;
+    };
     const refusedResult = (reason: string): PrismInferResult => ({
         output: "",
         backend: "refused",
@@ -1702,6 +1742,7 @@ export async function runInfer(args: PrismInferArgs, deps: InferDeps): Promise<P
         attempts,
         ...entMeta,
         gate_outcome: { status: "refused", reason, served_anyway: false },
+        refusal_layer: l1Layer ?? undefined,
     });
 
     debugLog(
@@ -1853,6 +1894,7 @@ export async function runInfer(args: PrismInferArgs, deps: InferDeps): Promise<P
         if (!args.messages?.length) {
             // Single turn: the exact call it always was.
             l1 = await l1fn(args.prompt, deps.ollamaUrl, l1Model, undefined, resolvedImages);
+            if (l1 !== "OBVIOUS_NOT_RESERVED") l1Layer = "prompt";
         } else {
             l1 = "OBVIOUS_NOT_RESERVED";
             // 1. Deterministic floor, per TURN and role-aware, regex only.
@@ -1879,7 +1921,7 @@ export async function runInfer(args: PrismInferArgs, deps: InferDeps): Promise<P
                 // of chars away from a trigger is not the same clause.
                 for (const slice of windowsOf(turn.content, DETERMINISTIC_FLOOR_WINDOW_CHARS, DETERMINISTIC_FLOOR_WINDOW_OVERLAP)) {
                     const det = classifyDeterministicLayer1(slice, { operational: isUser });
-                    if (det) l1 = worseLayer1Verdict(l1, det);
+                    if (det) l1 = raise(l1, det, "rules");
                 }
             }
             // 2. Semantic floor, per TURN in isolation; every verdict read
@@ -1907,8 +1949,8 @@ export async function runInfer(args: PrismInferArgs, deps: InferDeps): Promise<P
                 for (const window of historyTurnWindows(turn.content)) {
                     if (!window.trim()) continue;
                     const alone = await classifyHistoryWindow(l1fn, window, deps.ollamaUrl, l1Model, budget);
-                    if (alone === "OBVIOUS_RESERVED") { l1 = "OBVIOUS_RESERVED"; break history; }
-                    l1 = worseLayer1Verdict(l1, alone);
+                    if (alone === "OBVIOUS_RESERVED") { l1 = raise(l1, "OBVIOUS_RESERVED", "isolated"); break history; }
+                    l1 = raise(l1, alone, "isolated");
                 }
             }
             // The current prompt is a request: its deterministic floor runs
@@ -1920,7 +1962,7 @@ export async function runInfer(args: PrismInferArgs, deps: InferDeps): Promise<P
             let promptRoutine = true;
             for (const slice of windowsOf(args.prompt, DETERMINISTIC_FLOOR_WINDOW_CHARS, DETERMINISTIC_FLOOR_WINDOW_OVERLAP)) {
                 const promptDet = classifyDeterministicLayer1(slice);
-                if (promptDet) l1 = worseLayer1Verdict(l1, promptDet);
+                if (promptDet) l1 = raise(l1, promptDet, "rules");
                 if (promptDet !== "OBVIOUS_NOT_RESERVED") promptRoutine = false;
             }
             // The classifier entry point's own whole-prompt deterministic pass
@@ -1933,7 +1975,7 @@ export async function runInfer(args: PrismInferArgs, deps: InferDeps): Promise<P
             // (review round 19: skipping it there bypassed that floor).
             const promptFastPath = promptRoutine && args.prompt.length <= MAX_CLASSIFIER_PROMPT_LENGTH && (resolvedImages?.length ?? 0) === 0;
             if (l1 !== "OBVIOUS_RESERVED" && !promptFastPath) {
-                l1 = worseLayer1Verdict(l1, await l1fn(args.prompt, deps.ollamaUrl, l1Model, undefined, resolvedImages, { deterministic: false }));
+                l1 = raise(l1, await l1fn(args.prompt, deps.ollamaUrl, l1Model, undefined, resolvedImages, { deterministic: false }), "prompt");
             }
             // 3. Context, raise only: one window per turn and one for the
             // prompt (see contextWindows), cached like any window. Skipped
@@ -1947,13 +1989,13 @@ export async function runInfer(args: PrismInferArgs, deps: InferDeps): Promise<P
             } else {
                 for (const window of contextWindows(args)) {
                     if (!window.trim()) continue;
-                    l1 = worseLayer1Verdict(l1, await classifyHistoryWindow(l1fn, window, deps.ollamaUrl, l1Model, budget));
+                    l1 = raise(l1, await classifyHistoryWindow(l1fn, window, deps.ollamaUrl, l1Model, budget), "context");
                     if (l1 === "UNCERTAIN" || l1 === "OBVIOUS_RESERVED") break;
                 }
             }
             // A budget or breaker trip raises to UNCERTAIN whatever the cache
             // held (text: cloud or refused; with an image: local only).
-            if (budget.tripped) l1 = worseLayer1Verdict(l1, "UNCERTAIN");
+            if (budget.tripped) l1 = raise(l1, "UNCERTAIN", "budget");
             if (budget.calls > LAYER1_SCREEN_CALL_BUDGET) {
                 attempts.push({ tier: "layer1", reason: `layer1_screen_over_budget:${LAYER1_SCREEN_CALL_BUDGET}` });
             }
@@ -1999,7 +2041,7 @@ export async function runInfer(args: PrismInferArgs, deps: InferDeps): Promise<P
             if (allowCloud && (resolvedImages?.length ?? 0) > 0) {
                 attempts.push({ tier: "synalux", reason: "reserved_escalation_refused_images_stay_local" });
                 if (wantReport) return refusedResult("layer1_reserved");
-                throw makeReservedRefusal(l1, attempts, reservedCat, true);
+                throw makeReservedRefusal(l1, attempts, reservedCat, true, ledgerMeta());
             }
             if (allowCloud) {
                 const cloudTimeout = args.timeout_ms ?? 90_000;
@@ -2014,7 +2056,7 @@ export async function runInfer(args: PrismInferArgs, deps: InferDeps): Promise<P
                     if (weakBackend) {
                         attempts.push({ tier: "synalux", reason: `reserved_weak_backend:${cloud.backend}` });
                         if (wantReport) return refusedResult("layer1_reserved");
-                        throw makeReservedRefusal(l1, attempts, reservedCat, true);
+                        throw makeReservedRefusal(l1, attempts, reservedCat, true, ledgerMeta());
                     }
                     return await applyVerification(cloud.output, gatedArgs, deps, {
                         backend: cloud.backend ?? "synalux",
@@ -2031,7 +2073,7 @@ export async function runInfer(args: PrismInferArgs, deps: InferDeps): Promise<P
                 attempts.push({ tier: "synalux", reason: cloud.reason ?? "unknown" });
             }
             if (wantReport) return refusedResult("layer1_reserved");
-            throw makeReservedRefusal(l1, attempts, reservedCat, allowCloud);
+            throw makeReservedRefusal(l1, attempts, reservedCat, allowCloud, ledgerMeta());
         }
         if (l1 === "UNCERTAIN_LENGTH") {
             // §5.3: prompt too long to classify in full, but the full-text
@@ -2061,7 +2103,7 @@ export async function runInfer(args: PrismInferArgs, deps: InferDeps): Promise<P
             if ((resolvedImages?.length ?? 0) > 0) {
                 attempts.push({ tier: "synalux", reason: "error_escalation_refused_images_stay_local" });
                 if (wantReport) return refusedResult("layer1_error");
-                throw makeReservedRefusal(l1, attempts);
+                throw makeReservedRefusal(l1, attempts, null, false, ledgerMeta());
             }
             if (allowCloud) {
                 const cloudTimeout = args.timeout_ms ?? 90_000;
@@ -2085,6 +2127,7 @@ export async function runInfer(args: PrismInferArgs, deps: InferDeps): Promise<P
             debugLog(`[prism_infer] keyword backstop verdict=${backstop}`);
             attempts.push({ tier: "keyword_backstop", reason: `backstop_${backstop.toLowerCase()}` });
             if (backstop === "OBVIOUS_RESERVED") {
+                l1Layer = "backstop";   // the regex net refused, whatever raised the verdict before it
                 if (wantReport) return refusedResult("keyword_backstop_reserved");
                 // Serve-mode backstop refusal previously wrote NO ledger row —
                 // ledger it like every other refusal (no prompt content persisted).
@@ -2092,6 +2135,8 @@ export async function runInfer(args: PrismInferArgs, deps: InferDeps): Promise<P
                     backend: "refused", model: null, used_cloud: false,
                     gate_outcome: "refused",
                     refusal_reason: "keyword_backstop_reserved",
+                    history_turns: args.messages?.length ?? 0,
+                    refusal_layer: "backstop",
                 });
                 throw new Error(
                     `prism_infer: classifier failed + keyword backstop caught reserved content. attempts=${JSON.stringify(attempts)}`

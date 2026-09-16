@@ -32,8 +32,11 @@ A paid subscription adds cloud sync, higher model tiers, and team features throu
   undercounts inline — a number you can check, not marketing.
 - **Route-output enforcement** — route mode returns only well-formed calls to
   tools the host actually advertised. Standard and higher plans can add
-  authenticated deterministic correction; `route_guard: "local"` keeps the
-  prompt and draft entirely on-device.
+  authenticated deterministic correction; `route_guard: "local"` disables that
+  correction only. `cloud_fallback: false` forbids cloud inference fallback and
+  `verify: false` (with no `evidence`) disables the grounding verifier. With all
+  three off, no request carries your prompt, draft or evidence; the per-call
+  entitlement check and telemetry still contact the portal and carry neither.
 - **One setup for every agent** — `prism connect` configures Claude Code,
   Claude Desktop, Cursor, Gemini CLI, and Codex while preserving unrelated
   settings.
@@ -1034,8 +1037,10 @@ The free tier runs entirely on your machine. Paid tiers add cloud sync through t
 redaction (SSNs, dates of birth, medical record numbers, phone numbers, emails,
 and clinical identifiers are stripped before storage). Cloud inference and
 route correction send the request over TLS for processing and do not store it
-as Prism memory; use `route_guard: "local"` or the **local tier** for a full
-air-gap. **Enterprise** includes a HIPAA Business Associate Agreement.
+as Prism memory. The **local tier** (no Synalux key) is the air-gap;
+`route_guard: "local"` only skips the route correction, and `cloud_fallback`
+and `verify` govern the other two channels. **Enterprise** includes a HIPAA
+Business Associate Agreement.
 
 ---
 
@@ -1050,8 +1055,12 @@ before it reaches the host. Malformed or unadvertised calls become `NO_TOOL`.
 With `route_guard: "auto"` (the default), Standard and higher plans also send
 a well-formed draft for one of Prism's seven trained tools—or an unadvertised
 draft that may need correction—to Synalux for authenticated deterministic
-correction. Advertised custom host tools remain local. Set
-`route_guard: "local"` for a fully on-device route path.
+correction. Advertised custom host tools remain local. `route_guard: "local"`
+disables that correction only: cloud inference fallback is governed by
+`cloud_fallback`, and the grounding verifier is a separate channel with its
+own switch (`verify`, on by default when `evidence` is given). With all three
+off, no request carries your prompt, draft or evidence; the entitlement check
+and telemetry still contact the portal and carry neither.
 
 | Model | Ollama tag | Size | Vision | Routing accuracy¹ | Role | Automatic routing tier |
 |---|---|---|---|---|---|---|
@@ -1152,12 +1161,19 @@ check, the local 9B passed 2/3 tasks; the local 27B and Gemini 3.6 Flash each
 passed 3/3. This is a self-published regression signal, not an independent
 leaderboard or a claim of broad model equivalence.
 
-### Cloud Escalation (`cloud_fallback: true`)
+### Cloud Escalation (`cloud_fallback`)
 
 Prism always tries an eligible local model first. If the quality gate detects
-an empty, truncated, think-only, or looping response, paid tiers can retry the
-request through Gemini 3.6 Flash. Free-tier routing stays local and reports the
-quality-gate outcome without making a cloud call.
+an empty, truncated, think-only, or looping response, or the safety screen
+finds the request uncertain or reserved, a paid plan escalates the request
+through Gemini 3.6 Flash. Free-tier routing stays local and reports the
+outcome without making a cloud call.
+
+The flag follows the plan. Leave it unset and your plan decides: paid plans
+escalate, free plans never do. Pass `false` to forbid cloud inference fallback
+for a call, which the clinical delegation rules do for drafting; pass `true`
+to ask for it, which still requires a plan with cloud. A request that carries
+an image is never escalated; screenshots stay on this device.
 
 ---
 
@@ -1361,8 +1377,8 @@ prism_infer({
 })
 // → "n = countActiveUsers(data)"          (local 9b, $0)
 
-// A turn the on-device screen finds uncertain when read alone is not served
-// locally: it goes to Synalux cloud on a paid plan, or is refused with
+// A turn the on-device screen finds uncertain, alone or in context, is not
+// served locally: it goes to Synalux cloud on a paid plan, or is refused with
 // cloud_fallback: false. The result names the reason (layer1_uncertain) so
 // the host can decide what to do with the thread.
 prism_infer({
