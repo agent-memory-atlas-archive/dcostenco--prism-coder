@@ -2,6 +2,67 @@
 
 All notable changes to this project will be documented in this file.
 
+## 20.21.3 — 2026-09-16
+
+### A behaviour plan is now censused against its required sections
+
+The quality gate carried three static passes for Python and none for clinical
+output, so a behaviour plan missing its decision rules or its data-collection
+procedure was served exactly like a complete one. A structural check now runs in
+every mode whenever the request is behaviour-analytic, and the response reports
+what it found: `clinical_sections=3/10 missing:operational_definition,...`.
+
+Measured on local output during development: a plan request produced 1,716
+tokens covering three of ten required sections, and an operational-definition
+request produced 920 tokens with no non-examples. Neither was previously visible
+to the caller.
+
+Two limits are deliberate and worth stating plainly. The census **raises and
+never certifies** — it counts sections, and a section can be present and still
+be clinically wrong, so nothing it reports may be read as an endorsement; a
+credentialed BCBA decides whether a plan is adequate. And it does **not** widen
+what runs locally: crisis, restraint and self-injury content is refused upstream
+before any model sees it, and that boundary is untouched. In practice a plan
+request framed around aggression is refused before this check is reached, so it
+governs the routine band only.
+
+An incomplete plan is reported, never suppressed. The draft is still served,
+carrying its census, because a clinician is better served by a plan labelled
+`3/10` than by silence — an earlier revision failed the quality gate on a
+missing section, and a request that could not escalate returned no output at
+all. Two findings do fail, because they are defects rather than gaps: AAC
+access restricted as a consequence, and an operational definition written
+without non-examples.
+
+Nothing here is auto-repaired. Re-prompting the same local model to invent a
+missing decision-rules section produces plausible unratified clinical text,
+which is worse than a visible gap.
+
+
+### `prism_infer` now tells you how much history it received
+
+The tool's documentation has promised since multi-turn shipped that "every
+entitlement-resolved result reports `multi_turn` (your plan's caps) and
+`history_turns` (what was sent)". Both values were computed and recorded
+internally, but neither was ever rendered into the response, so the only way to
+learn what a call actually carried was to read the local metrics database.
+
+That gap is easy to fall into and hard to notice. A caller that intends to send
+conversation history but omits `messages` — a typo, a dropped parameter, a host
+that compacted the schema — gets a plausible-looking answer produced from the
+current turn alone, with nothing in the response indicating the history never
+arrived. Follow-up answers degrade exactly the way a weak model would degrade,
+and the cause is invisible.
+
+Every response header now ends with `history_turns=N`, including
+`history_turns=0`, plus `multi_turn=<turns>/<chars>` for the plan's caps, or
+`multi_turn=off` where the plan has no multi-turn. The zero case is reported
+deliberately: an omitted field is what made this silent.
+
+No behavior other than the header changed. The header builder is now a pure
+exported function, `inferResponseHeader`, so the reporting contract is covered
+by tests rather than by a live call.
+
 ## 20.21.2 — 2026-09-16
 
 ### Local results carried names and nothing else
