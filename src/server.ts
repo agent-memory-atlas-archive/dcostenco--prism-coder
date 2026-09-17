@@ -1471,6 +1471,65 @@ export async function startServer() {
 
   console.error(`[Prism] MCP Server successfully started and listening on stdio...`);
 
+  // Heal a startup block whose content differs from what this binary writes.
+  // (Not "older": nothing orders versions, so a pinned older install can
+  // rewrite what a newer one wrote.) The instruction files are the
+  // one channel that does not travel with the package — `initialize`
+  // instructions and every tool description update with the binary, a native
+  // instruction file keeps whatever connect last wrote — and nothing on an
+  // ordinary machine re-runs connect: `prism update` never touches host
+  // configuration by design, autoupdate runs `update`, and the postinstall
+  // path covers only the prompt-routing hook and is routinely disabled by
+  // npm's ignore-scripts. 20.21.0 is the release that
+  // proved the cost: the old text told hosts to pass `cloud_fallback: false`,
+  // which made a paid plan's escalation unreachable.
+  //
+  // Refresh-only, so this can only ever rewrite a block the operator already
+  // consented to by running connect once: the install branch is unreachable
+  // from here, and a file without exactly one ordered marker pair is left
+  // byte-for-byte alone. Startup blocks only — never MCP registration, which
+  // is what connect's "close your hosts first" warning is about. These files
+  // do have another writer (Gemini CLI writes GEMINI.md on a remember
+  // request, Claude Code writes CLAUDE.md on /init), so the refresh replaces
+  // only its own marker-delimited block, marker lines included, and re-checks
+  // immediately before committing. After the transport is connected, so the handshake is never
+  // held behind disk I/O. PRISM_NO_STARTUP_REFRESH=1 opts out.
+  //
+  // DEFERRED, and unref'd, for two reasons. `connect.js` is a large module
+  // (the whole CLI surface, TOML parser included) and importing it is
+  // synchronous CPU work: awaited here it competes with the FIRST tool call,
+  // which on a cold host is the one that has to do a storage round trip. And
+  // an unref'd timer can never hold the process open. The block is read by the
+  // host at session start, so it was always landing on the next session — a
+  // couple of seconds changes nothing about when the fix arrives.
+  if (process.env.PRISM_NO_STARTUP_REFRESH !== "1") {
+    setTimeout(() => { void refreshStartupBlocksInBackground(); }, 2_000).unref();
+  }
+
+  await resumeServerStartup(server);
+}
+
+async function refreshStartupBlocksInBackground(): Promise<void> {
+  try {
+    const { refreshManagedStartupBlocks } = await import("./connect.js");
+    for (const result of refreshManagedStartupBlocks()) {
+      if (result.status === "refreshed") {
+        // The host read this file when the session began, so the corrected
+        // text applies from the next one.
+        console.error(`[Prism] refreshed the ${result.host} startup block to match this version: ${result.path} (applies from your next session)`);
+      } else if (result.status === "failed") {
+        console.error(`[Prism] could not refresh the ${result.host} startup block (${result.detail}); run: prism connect`);
+      } else if (process.env.PRISM_DEBUG) {
+        console.error(`[Prism] startup block ${result.host}: ${result.status}${result.detail ? ` (${result.detail})` : ""}`);
+      }
+    }
+  } catch (error) {
+    // Never the reason a server fails to start.
+    if (process.env.PRISM_DEBUG) console.error(`[Prism] startup refresh skipped: ${error instanceof Error ? error.message : error}`);
+  }
+}
+
+async function resumeServerStartup(server: ReturnType<typeof createServer>): Promise<void> {
   // Start the authoritative tier-skill refresh only after the MCP transport is
   // connected. session_load_context awaits this same single-flight promise,
   // while the initialize handshake is never held behind portal I/O. The

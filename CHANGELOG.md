@@ -2,6 +2,58 @@
 
 All notable changes to this project will be documented in this file.
 
+## Unreleased
+
+### A stale startup block heals itself when a session starts
+
+20.21.0 corrected the text `prism connect` writes into host instruction files:
+the old wording told hosts to pass `cloud_fallback: false`, which is what made
+a paid plan's escalation unreachable. Nothing on an ordinary machine rewrites
+that text. `prism update` never touches host configuration by design,
+`autoupdate` runs `update`, and the `postinstall` upgrade path is both limited
+to the prompt-routing hook and routinely disabled by npm's ignore-scripts,
+which blocked it again while publishing 20.21.0. So the fix shipped and the
+instruction that defeats it stayed on disk.
+
+The server now refreshes a managed startup block once its transport is
+connected. It is the narrowest useful subset of connect, and the narrowness is
+the contract:
+
+- **It can only refresh, never install.** The install branch is unreachable
+  from this path, so a file without exactly one ordered pair of Prism ownership
+  markers is left byte-for-byte alone and an absent file is never created. Only
+  `prism connect` can first install a block; consent is never inferred from a
+  server start. An opening marker without a valid pair is reported, not
+  repaired, and a closing marker alone is simply not ours.
+- **Startup blocks only.** MCP host registration is never touched, which is
+  what connect's "close your hosts first" warning is about.
+- **Content-addressed**, so a current block is not rewritten on every start.
+  Two hosts that resolve to one file (a `GEMINI.md` symlinked to `CLAUDE.md` is
+  a common single-file setup, or a hard link) are reported rather than healed:
+  they share an ownership marker but serialize different instructions, so no
+  content satisfies both, and whose block it should be is the operator's call.
+  Sameness is the file's inode, not its path, so a hard link counts. Before
+  this the file was rewritten once per host on every start, forever.
+- **Never fatal.** A failure is reported and the server starts. A file whose
+  own mode is read-only is still replaced when its directory is writable,
+  because the write is an atomic rename: `chmod` is not the opt-out,
+  `PRISM_NO_STARTUP_REFRESH=1` is.
+
+Two limits worth stating plainly. Gemini CLI writes `GEMINI.md` itself when you
+ask it to remember something, and Claude Code writes `CLAUDE.md` on `/init`, so
+these files do have another writer: the refresh replaces only its own
+marker-delimited block, marker lines included, and re-checks the file
+immediately before committing, but a write that lands inside that final window
+would be overwritten. And "stale"
+means "differs from what this binary writes", not "older", so a pinned older
+install can rewrite a block a newer one wrote.
+
+The host reads its instruction file when a session begins, so a refresh lands
+on the next one either way. It therefore runs on a short unref'd timer rather
+than in the startup path: loading the connect module is synchronous work that
+would otherwise compete with the first tool call, which on a cold host is the
+one doing a storage round trip. `PRISM_NO_STARTUP_REFRESH=1` opts out.
+
 ## 20.21.5 — 2026-09-17
 
 ### Generated TypeScript is type checked, not pattern matched
