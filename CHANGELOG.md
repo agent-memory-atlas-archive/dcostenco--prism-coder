@@ -2,6 +2,64 @@
 
 All notable changes to this project will be documented in this file.
 
+## 20.21.4 — 2026-09-17
+
+### A generic with no type argument is repaired instead of shipped
+
+`prism-coder:9b` writes `Map<string, Array>` — observed in four separate
+generations of the same task, including through the live server. It is TS2314,
+so nothing it produces compiles. The coding gate carried three static passes for
+Python and none for TypeScript, so this shipped every time.
+
+Detection needs no TypeScript dependency; the shape is unambiguous when a bare
+generic sits inside a type-argument list or directly after a type annotation.
+The deterministic repair parameterises it — `Array<any>`, not `Array<unknown>`,
+because `unknown` trades one compile error for one at every use site — and the
+existing repair machinery serves the corrected code without a second generation.
+Verified against real model output: one substitution and the file compiles clean
+under `--strict`.
+
+This makes the code build. It does not make it well typed, and it does not
+address defects that need real type checking, such as a method returning
+`PromiseSettledResult[]` under a `Promise<void>` signature.
+
+### Plan requests carry the section list they will be measured against
+
+A behaviour-plan request now receives a system instruction naming every required
+section, generated from the same list the census verifies, so the list that
+instructs is the list that verifies. Measured on the live 9b: the same request
+scored 7 of 10 unscaffolded and 10 of 10 scaffolded, in fewer characters — it
+restructured rather than padded, and the previously absent sections returned
+with substantive content, including non-examples and a correctly worded review
+statement. A caller's own `system` always wins, including an explicit empty one.
+
+The cost is recorded rather than hidden: once the model is told the list, the
+census confirms that an instruction was followed rather than independently
+finding that a plan is complete. A scaffolded 10 of 10 is weaker evidence than
+an unscaffolded one.
+
+
+### The clinical census credited only its own vocabulary
+
+The section check shipped in 20.21.3 reported seven sections missing from a real
+behaviour plan. Four of those were present: antecedent strategies under the
+heading "Pre-Work Strategies", consequence strategies under "Response to
+Behavior", caregiver training as "All staff will be trained on the plan", and
+decision rules as "Evaluation Criteria: ... the plan will be adjusted". The true
+count was 7 of 10, not 3.
+
+The patterns required canonical ABA phrasing. Plans written in plain language —
+which is what a model actually produces — read as missing sections they
+contained. A raise-only check that is wrong four times in seven gets ignored,
+which costs more than the check earns.
+
+Four patterns now match the concept rather than the term. The fixtures were
+rebuilt from verbatim model output instead of authored prose: the previous
+fixture scored 10 of 10 because it had been written in the matcher's own
+vocabulary, so it measured the fixture rather than the gate. A sparse plan that
+genuinely lacks those sections is pinned alongside it, because widening a
+pattern to remove a false positive can silence a real gap.
+
 ## 20.21.3 — 2026-09-16
 
 ### A behaviour plan is now censused against its required sections

@@ -58,17 +58,17 @@ const CLINICAL_CONTEXT_RE =
     /\b(aba\b|bcba\b|behaviou?r analyst|functional behaviou?r assessment|\bfba\b|\bbip\b|replacement behaviou?r|target behaviou?r|reinforcement schedule|\bfct\b|\bdro\b|\bdra\b|\bncr\b)/i;
 
 /** Ordered so the report reads the way a plan is written. */
-const PLAN_SECTIONS: ReadonlyArray<{ name: string; pattern: RegExp }> = [
-    { name: "operational_definition", pattern: /operational(?:ly)?[ -]?defin|\bdefinition\b[\s\S]{0,80}\b(observable|measurable)\b/i },
-    { name: "function_hypothesis", pattern: /\b(hypothesi[sz]ed function|function of the behaviou?r|maintained by|\ba-?b-?c\b|antecedent[\s\S]{0,40}consequence)\b/i },
-    { name: "antecedent_strategies", pattern: /\b(antecedent (?:strateg|modificat|intervention)|prevention strateg|setting event|environmental modificat)/i },
-    { name: "replacement_behaviour", pattern: /\b(replacement behaviou?r|functional communication training|\bfct\b|alternative behaviou?r|\bdra\b)/i },
-    { name: "consequence_strategies", pattern: /\b(consequence (?:strateg|procedure)|reinforcement (?:schedule|procedure|strateg)|\bdro\b|\bncr\b|extinction)/i },
-    { name: "data_collection", pattern: /\b(data collection|data sheet|measurement (?:system|procedure)|frequency count|partial interval|momentary time sampling|\bioa\b|interobserver)/i },
-    { name: "decision_rules", pattern: /\b(decision rule|mastery criteri|criteri\w+ for (?:change|modificat|advancement)|review (?:schedule|trigger)|plan review)/i },
-    { name: "generalisation_maintenance", pattern: /\b(generali[sz]|maintenance)\b/i },
-    { name: "caregiver_training", pattern: /\b((?:caregiver|staff|parent|family)[ -]?training|train(?:ing)? (?:the )?(?:caregivers?|staff|parents?))/i },
-    { name: "bcba_review_disclaimer", pattern: /\b(reviewed and individuali[sz]ed|credentialed bcba|licensed behaviou?r analyst|must be reviewed)\b/i },
+const PLAN_SECTIONS: ReadonlyArray<{ name: string; requirement: string; pattern: RegExp }> = [
+    { name: "operational_definition", requirement: "an operational definition that is observable and measurable, with examples AND non-examples", pattern: /operational(?:ly)?[ -]?defin|\bdefinition\b[\s\S]{0,80}\b(observable|measurable)\b/i },
+    { name: "function_hypothesis", requirement: "a hypothesised function supported by A-B-C data", pattern: /\b(hypothesi[sz]ed function|function of the behaviou?r|maintained by|\ba-?b-?c\b|antecedent[\s\S]{0,40}consequence)\b/i },
+    { name: "antecedent_strategies", requirement: "antecedent and prevention strategies", pattern: /\b(antecedent (?:strateg|modificat|intervention|procedure|support)|prevention strateg|proactive strateg|pre-?work strateg|pre-?correct|setting event|environmental modificat|visual (?:schedule|timer|cue)|priming)/i },
+    { name: "replacement_behaviour", requirement: "a functionally equivalent replacement behaviour", pattern: /\b(replacement behaviou?r|functional communication training|\bfct\b|alternative behaviou?r|\bdra\b)/i },
+    { name: "consequence_strategies", requirement: "consequence strategies, including what reinforces the replacement", pattern: /\b(consequence|reinforcement (?:schedule|procedure|strateg|plan|system|for\b)|reinforc\w+ the (?:replacement|desired|appropriate|target)|planned ignoring|response to (?:the )?behaviou?r|redirect\w*|\bpraise\b|\bdro\b|\bncr\b|extinction)/i },
+    { name: "data_collection", requirement: "a data collection method", pattern: /\b(data collection|data sheet|measurement (?:system|procedure)|frequency count|partial interval|momentary time sampling|\bioa\b|interobserver)/i },
+    { name: "decision_rules", requirement: "decision rules and a review schedule", pattern: /\b(decision rule|mastery criteri|criteri\w+ for (?:change|modificat|advancement)|evaluation criteri|review (?:schedule|trigger|date)|plan review|progress monitor\w*|plan will be (?:adjusted|modified|revised|changed))/i },
+    { name: "generalisation_maintenance", requirement: "generalisation and maintenance", pattern: /\b(generali[sz]|maintenance)\b/i },
+    { name: "caregiver_training", requirement: "caregiver and staff training", pattern: /\b((?:caregiver|staff|parent|family|teacher|team)[ -]?training|train(?:ing|ed)? (?:the )?(?:caregivers?|staff|parents?|team)|(?:staff|caregivers?|parents?|team|teachers?)\b[^.\n]{0,30}\btrain\w+|train\w+ on the plan)/i },
+    { name: "bcba_review_disclaimer", requirement: "a statement that a credentialed BCBA must review and individualise the plan before implementation", pattern: /\b(reviewed and individuali[sz]ed|credentialed bcba|licensed behaviou?r analyst|must be reviewed)\b/i },
 ];
 
 /**
@@ -129,6 +129,60 @@ function aacRestrictedAsConsequence(output: string): boolean {
     return false;
 }
 
+/** Characters of real prose required near a section marker for it to count. */
+const SECTION_CONTENT_CHARS = 30;
+const SECTION_WINDOW = 400;
+
+/** Drop whole heading lines. Stripping only the `#` turns the NEXT heading into
+ *  prose, which is why ten empty headings first scored 8 of 10. */
+function proseOnly(text: string): string {
+    return text
+        .split("\n")
+        .filter(line => !/^\s*#{1,6}\s/.test(line))          // markdown headings
+        .filter(line => !/^\s*\*\*[^*]+\*\*\s*:?\s*$/.test(line)) // bold-only lines
+        .join(" ")
+        .replace(/[>#*_|]+/g, "")
+        .replace(/\[[^\]]*\]/g, "")                          // [placeholders]
+        .replace(/[-\s]+/g, " ")
+        .trim();
+}
+
+/**
+ * A section counts only when there is real prose NEAR its marker.
+ *
+ * Without this, ten empty headings scored 8 of 10: an output with no clinical
+ * content looked nearly complete, because the census matched vocabulary rather
+ * than substance. The scaffold already demands "substantive content rather than
+ * a heading alone"; this is the census checking the same thing.
+ *
+ * The window spans both directions. A first version looked only forward and
+ * dropped a legitimate credit — "we will write down how often it happens on a
+ * data sheet" puts the content BEFORE the keyword.
+ *
+ * Two limits, both measured rather than assumed.
+ *
+ * The window is wide, so in a dense document a marker finds prose belonging to
+ * a NEIGHBOURING section and is credited for it. This is therefore closer to a
+ * document-level check than a per-section one; what it reliably catches is the
+ * empty or near-empty output, which is what it was added for.
+ *
+ * And a model that echoes the section list back as prose still scores full
+ * marks, because a description of what a plan must contain is, at this level of
+ * analysis, indistinguishable from a plan. That is a limit of the approach, not
+ * something to regex away, and one more reason nothing here is an endorsement.
+ *
+ * The floor is deliberately low. At 50 characters a legitimately terse section
+ * — "Frequency count / Daily tally / Weekly IOA" — was refused, and a false
+ * negative on real content is the more expensive error for a gap report.
+ */
+function sectionHasContent(output: string, pattern: RegExp): boolean {
+    const m = new RegExp(pattern.source, pattern.flags.replace("g", "")).exec(output);
+    if (!m) return false;
+    const at = m.index ?? 0;
+    const window = output.slice(Math.max(0, at - SECTION_WINDOW), at + m[0].length + SECTION_WINDOW);
+    return proseOnly(window).length >= SECTION_CONTENT_CHARS;
+}
+
 /**
  * Raise-only structural check. `pass: true` means nothing was detected as
  * missing — it is not a clinical endorsement.
@@ -160,7 +214,9 @@ export function passesClinicalQualityGate(
 
     if (!CLINICAL_PLAN_REQUEST_RE.test(prompt)) return { pass: true };
 
-    const missing = PLAN_SECTIONS.filter(s => !s.pattern.test(output)).map(s => s.name);
+    const missing = PLAN_SECTIONS
+        .filter(s => !sectionHasContent(output, s.pattern))
+        .map(s => s.name);
     const sections: ClinicalSectionReport = {
         required: PLAN_SECTIONS.length,
         present: PLAN_SECTIONS.length - missing.length,
@@ -184,4 +240,45 @@ export function passesClinicalQualityGate(
 export function formatClinicalSections(s: ClinicalSectionReport): string {
     const base = `clinical_sections=${s.present}/${s.required}`;
     return s.missing.length ? `${base} missing:${s.missing.join(",")}` : base;
+}
+
+/**
+ * A system instruction naming every section a plan must contain, generated from
+ * PLAN_SECTIONS so the list that INSTRUCTS is the list that VERIFIES.
+ *
+ * Measured on prism-coder:9b: the same plan request scored 7/10 unscaffolded and
+ * 10/10 scaffolded, in FEWER characters — it restructured rather than padded,
+ * and the previously absent sections came back with substantive content
+ * (a real observable definition with non-examples, real generalisation content,
+ * a correctly worded review statement).
+ *
+ * KNOWN EPISTEMIC COST, recorded rather than hidden: once the model is told the
+ * list, the census stops being independent confirmation and becomes a check
+ * that the instruction was followed. A scaffolded 10/10 is weaker evidence than
+ * an unscaffolded one. Sharing one list is still the right trade — two lists
+ * drift, and a census that disagrees with the instruction is worse than a
+ * census that merely confirms it — but nothing here should be read as evidence
+ * that the model knows what a plan needs.
+ *
+ * LOCAL ONLY. `callCloud` takes the prompt and no system argument, so nothing
+ * here reaches an escalated request — true of VISION_SYSTEM_PROMPT as well, and
+ * pre-existing rather than introduced with this scaffold. The consequence is
+ * that a cloud-served plan is measured by the census WITHOUT having been given
+ * the list, so it can score lower than a local one for reasons that have
+ * nothing to do with the model. Threading `system` through the portal API is
+ * the real fix and is deliberately out of scope here.
+ *
+ * Returns undefined unless a full plan was requested, so it never touches the
+ * prompt for ordinary work.
+ */
+export function clinicalPlanScaffold(prompt: string): string | undefined {
+    if (!CLINICAL_PLAN_REQUEST_RE.test(prompt)) return undefined;
+    const items = PLAN_SECTIONS.map(s => `- ${s.requirement}`).join("\n");
+    return (
+        "A behaviour plan must contain all of the following, each with substantive "
+        + "content rather than a heading alone:\n" + items
+        + "\n\nUse least restrictive, dignity-preserving, function-based procedures. "
+        + "Never restrict, remove or delay access to an AAC or communication device "
+        + "as a consequence."
+    );
 }

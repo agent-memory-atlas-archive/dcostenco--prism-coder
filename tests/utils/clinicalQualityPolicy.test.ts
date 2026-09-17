@@ -10,6 +10,7 @@
 import { describe, it, expect } from "vitest";
 import {
     passesClinicalQualityGate,
+    clinicalPlanScaffold,
     formatClinicalSections,
 } from "../../src/utils/clinicalQualityPolicy.js";
 
@@ -131,6 +132,106 @@ describe("the plan trigger covers how a plan is actually named", () => {
     }
 });
 
+/**
+ * VERBATIM prism-coder:9b output, captured live 2026-09-16 through the real
+ * handler. It exists because the hand-written COMPLETE_BIP above scored 10/10
+ * while the SAME gate scored this at 3/10 and was wrong about four of them.
+ *
+ * The cause was that I wrote the fixture in the matcher's own vocabulary —
+ * literal "Antecedent strategies:", "Caregiver training:", "Decision rules:"
+ * headings — so the test could not fail for the right reason. Real output uses
+ * plain-language headings: "Pre-Work Strategies", "Response to Behavior",
+ * "All staff will be trained", "Evaluation Criteria". A fixture phrased in the
+ * gate's language measures the fixture, not the gate.
+ *
+ * Do not reword this toward canonical ABA terms. Its value is that it is not.
+ */
+const REAL_9B_PLAN = `
+## **Behavior Support Plan**
+
+**Review Date:** [Date, typically 2-4 weeks later]
+
+### **1. Case Description**
+*   **Behavior:** The student calls out during independent work time.
+
+### **2. Functional Assessment**
+*   **What is the behavior maintaining?**
+    *   **Attention:** The student seeks attention from the teacher/peers.
+    *   **Escape/Avoidance:** The student wants to escape a difficult task.
+*   **Assessment Method:** [e.g., Data collection over 2 weeks, ABC data sheets].
+
+### **3. Goals**
+*   **Replacement Behavior:** The student will use an appropriate communication request.
+
+### **4. Intervention Plan**
+#### **Pre-Work Strategies**
+*   **Clear Transitions:** Use visual timers to signal the start of independent work.
+*   **Visual Cues:** Post a "What's Next" schedule on the student's desk.
+#### **Response to Behavior**
+*   **Ignoring/Redirecting:** If the behavior is attention-seeking, the teacher will ignore it.
+*   **Reinforcement for Replacement:** Praise the student when they use the method.
+
+### **5. Data Collection**
+*   **Data Sheet:** [Link/Location of data sheet].
+
+### **6. Implementation Plan**
+*   **Training:** All staff will be trained on the plan and data collection.
+
+### **7. Evaluation**
+*   **Evaluation Criteria:** If the behavior is reduced by 50% within 2 weeks, the plan will be adjusted.
+`;
+
+/** A plan that genuinely lacks the sections above — guards the opposite error,
+ *  since widening patterns to kill false positives can silence real gaps. */
+const SPARSE_PLAN = `
+## Behavior Support Plan
+
+The student calls out during independent work. We think he wants attention.
+Goal: reduce calling out.
+Replacement behavior: the student will raise a hand instead.
+We will write down how often it happens on a data sheet.
+`;
+
+describe("the census is measured against real model output, not authored prose", () => {
+    it("credits sections written under plain-language headings", () => {
+        const r = passesClinicalQualityGate(PLAN_PROMPT, REAL_9B_PLAN);
+        // Present in substance, under headings the gate must not insist on:
+        //   antecedent  -> "Pre-Work Strategies" / visual timers / visual cues
+        //   consequence -> "Response to Behavior" / Ignoring / Reinforcement
+        //   caregiver   -> "All staff will be trained on the plan"
+        //   decision    -> "Evaluation Criteria: ... the plan will be adjusted"
+        for (const credited of [
+            "antecedent_strategies",
+            "consequence_strategies",
+            "caregiver_training",
+            "decision_rules",
+        ]) {
+            expect(r.sections?.missing, `${credited} is present in substance`).not.toContain(credited);
+        }
+    });
+
+    it("still reports the three this plan genuinely lacks", () => {
+        const r = passesClinicalQualityGate(PLAN_PROMPT, REAL_9B_PLAN);
+        expect(r.sections?.missing.sort()).toEqual(
+            ["bcba_review_disclaimer", "generalisation_maintenance", "operational_definition"],
+        );
+        expect(r.sections?.present).toBe(7);
+    });
+
+    it("does not go blind: a sparse plan still reports its real gaps", () => {
+        const r = passesClinicalQualityGate(PLAN_PROMPT, SPARSE_PLAN);
+        for (const absent of [
+            "antecedent_strategies",
+            "consequence_strategies",
+            "caregiver_training",
+            "decision_rules",
+        ]) {
+            expect(r.sections?.missing, `${absent} is genuinely absent here`).toContain(absent);
+        }
+        expect(r.sections?.present).toBe(2);
+    });
+});
+
 describe("AAC access may never be a consequence", () => {
     it("raises when the device is removed as a consequence", () => {
         const r = passesClinicalQualityGate(
@@ -220,5 +321,145 @@ describe("it raises but never certifies", () => {
         expect(
             formatClinicalSections({ required: 10, present: 8, missing: ["decision_rules", "caregiver_training"] }),
         ).toBe("clinical_sections=8/10 missing:decision_rules,caregiver_training");
+    });
+});
+
+describe("the plan scaffold is generated from the list the census verifies", () => {
+    const PLAN = "Draft a behavior support plan for a student who calls out.";
+
+    it("is absent for anything that is not a plan request", () => {
+        for (const prompt of [
+            "Write a TypeScript EventEmitter.",
+            "What does DRO stand for?",
+            "Write an operational definition of elopement.",
+        ]) {
+            expect(clinicalPlanScaffold(prompt), prompt).toBeUndefined();
+        }
+    });
+
+    for (const name of [
+        "behavior intervention plan", "behaviour intervention plan",
+        "behavior support plan", "behaviour support plan",
+        "behavior management plan", "behavior plan", "behaviour plan", "BIP",
+    ]) {
+        it(`is produced for a request naming a "${name}"`, () => {
+            expect(clinicalPlanScaffold(`Draft a ${name} for a student.`)).toBeDefined();
+        });
+    }
+
+    it("names exactly as many requirements as the census requires — one list, not two", () => {
+        // The invariant that makes the shared list real. Adding a section to the
+        // census without a requirement, or vice versa, breaks this rather than
+        // silently producing a scaffold that cannot satisfy the check.
+        const bullets = (clinicalPlanScaffold(PLAN) ?? "").split("\n").filter(l => l.startsWith("- ")).length;
+        const required = passesClinicalQualityGate(PLAN, "").sections?.required;
+        expect(bullets).toBe(required);
+    });
+
+    it("asks for the two things the 9b most often omits", () => {
+        const sc = clinicalPlanScaffold(PLAN) ?? "";
+        expect(sc).toMatch(/non-examples/i);
+        expect(sc).toMatch(/credentialed BCBA/i);
+    });
+
+    it("carries the AAC rule, which no section census can enforce", () => {
+        const sc = clinicalPlanScaffold(PLAN) ?? "";
+        expect(sc).toMatch(/never restrict, remove or delay access to an AAC/i);
+    });
+
+    it("demands substance rather than headings", () => {
+        expect(clinicalPlanScaffold(PLAN) ?? "").toMatch(/substantive content rather than a heading alone/i);
+    });
+
+    it("does not itself assert the plan is adequate", () => {
+        const sc = (clinicalPlanScaffold(PLAN) ?? "").toLowerCase();
+        for (const verdict of ["approved", "is safe", "complete and correct", "ready to implement"]) {
+            expect(sc).not.toContain(verdict);
+        }
+    });
+});
+
+describe("a section needs a strategy, not a passing mention of its vocabulary", () => {
+    /**
+     * From adversarial review of the widening that fixed the false positives.
+     * Widening `antecedent_strategies` to a bare `antecedent` and
+     * `consequence_strategies` to a bare `reinforc\w+` credited assessment prose
+     * as if it were an intervention. The sparse-plan fixture did not catch it
+     * because that plan never uses either word — a gap only visible by probing
+     * the vocabulary directly.
+     */
+    const P = "Draft a behavior support plan for calling out.";
+    const missing = (text: string, section: string) =>
+        passesClinicalQualityGate(P, text).sections?.missing.includes(section);
+
+    it("does not treat A-B-C assessment data as antecedent strategies", () => {
+        expect(missing("We collected antecedent-behavior-consequence data for two weeks.", "antecedent_strategies")).toBe(true);
+    });
+
+    it("does not treat a statement of function as consequence strategies", () => {
+        expect(missing("The behavior appears maintained by reinforcement from peers.", "consequence_strategies")).toBe(true);
+    });
+
+    it("still credits real antecedent strategies written plainly", () => {
+        expect(missing("Prevention: offer a choice before each demand; use a visual timer.", "antecedent_strategies")).toBe(false);
+    });
+
+    it("still credits a real consequence plan written plainly", () => {
+        expect(missing("Response to behavior: planned ignoring, then praise the replacement.", "consequence_strategies")).toBe(false);
+    });
+
+    it("keeps the real-output and sparse fixtures at their adjudicated scores", () => {
+        expect(passesClinicalQualityGate(PLAN_PROMPT, REAL_9B_PLAN).sections?.present).toBe(7);
+        expect(passesClinicalQualityGate(PLAN_PROMPT, SPARSE_PLAN).sections?.present).toBe(2);
+    });
+});
+
+describe("a section marker without prose beside it is not a section", () => {
+    /** Round 2 of adversarial review. Ten empty headings scored 8 of 10: an
+     *  output with no clinical content read as nearly complete. */
+    const P = "Draft a behavior support plan for a student who calls out.";
+    const HEADINGS = [
+        "Operational Definition", "Function", "Antecedent Strategies",
+        "Replacement Behaviour", "Consequence Strategies", "Data Collection",
+        "Decision Rules", "Generalization and Maintenance", "Caregiver Training",
+        "BCBA Review",
+    ].map(h => `### ${h}\n`).join("\n");
+
+    it("credits nothing for headings alone", () => {
+        expect(passesClinicalQualityGate(P, HEADINGS).sections?.present).toBe(0);
+    });
+
+    it("does not let a neighbouring heading count as one section's content", () => {
+        // The first version stripped only the `#`, which turned the NEXT heading
+        // into prose and left this at 6 of 10.
+        const two = "### Data Collection\n\n### Decision Rules\n";
+        expect(passesClinicalQualityGate(P, two).sections?.present).toBe(0);
+    });
+
+    it("credits content that PRECEDES the keyword", () => {
+        // A forward-only window dropped this legitimate credit.
+        const before = "We will write down how often the behaviour happens each session on a data sheet.";
+        expect(passesClinicalQualityGate(P, before).sections?.missing).not.toContain("data_collection");
+    });
+
+    it("leaves the adjudicated fixtures where they were", () => {
+        expect(passesClinicalQualityGate(PLAN_PROMPT, REAL_9B_PLAN).sections?.present).toBe(7);
+        expect(passesClinicalQualityGate(PLAN_PROMPT, SPARSE_PLAN).sections?.present).toBe(2);
+    });
+
+    it("credits a legitimately terse section written as short bullets", () => {
+        // Round 3. At a 50-character floor this real content was refused. A false
+        // negative on real content is the more expensive error for a gap report,
+        // so the floor is deliberately low.
+        const terse = "### Data Collection\n- Frequency count\n- Daily tally\n- Weekly IOA";
+        expect(passesClinicalQualityGate(P, terse).sections?.missing).not.toContain("data_collection");
+    });
+
+    it("KNOWN LIMIT: echoing the section list back still scores full marks", () => {
+        // Recorded, not fixed. A description of what a plan must contain is, to a
+        // presence check, indistinguishable from a plan. Pinned so the limit is
+        // visible rather than discovered later by someone trusting the number.
+        const echo = clinicalPlanScaffold(P) ?? "";
+        expect(passesClinicalQualityGate(P, echo).sections?.present).toBe(10);
     });
 });

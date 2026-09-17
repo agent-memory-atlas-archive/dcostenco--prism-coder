@@ -419,10 +419,108 @@ function pythonStaticContractFailure(code: string): string | undefined {
         : undefined;
 }
 
+/**
+ * A generic used with no type argument, e.g. `Map<string, Array>`.
+ *
+ * prism-coder:9b emits this repeatedly — observed in four separate generations
+ * of the same EventEmitter task — and it is a hard compile error (TS2314), so
+ * the file never builds. Detecting it needs no TypeScript dependency: the shape
+ * is unambiguous when the bare name sits inside a type-argument list or
+ * directly after a type annotation.
+ *
+ * Deliberately narrow. Prose mentioning "the Array, then the Map" must not
+ * match, so a bare name is only a finding when it is syntactically in a type
+ * position; a bare `Promise` as a lone return type with no delimiter after it
+ * is missed, which is the conservative direction.
+ */
+const TS_GENERIC = "(?:Array|Map|Set|Promise|Record|Partial|Readonly|WeakMap|WeakSet)";
+const TS_BARE_GENERIC_RE = new RegExp(
+    `<[^<>]*\\b${TS_GENERIC}\\b(?!\\s*<)[^<>]*>` +
+    `|:\\s*${TS_GENERIC}\\b(?!\\s*<)\\s*[={;,)\\]]`,
+);
+
+/** Null when the code carries no TypeScript static-contract defect. */
+function tsStaticContractFailure(code: string): string | null {
+    return TS_BARE_GENERIC_RE.test(code) ? "ts_static_contract:bare_generic" : null;
+}
+
+/** Character ranges a repair must not touch on one line.
+ *
+ *  Strings, because rewriting `"use Map<string, Array> carefully"` changes a
+ *  RUNTIME VALUE rather than a type. And comments, because `// don't use a bare
+ *  Map<string, Array>` is a warning against the very thing the repair would
+ *  write, so editing it inverts the author's meaning. Both found in review. */
+function protectedSpans(line: string): Array<[number, number]> {
+    const spans: Array<[number, number]> = [];
+    const strings = /"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`/g;
+    for (const m of line.matchAll(strings)) spans.push([m.index ?? 0, (m.index ?? 0) + m[0].length]);
+    // A line comment runs to end of line. An apostrophe in prose ("don't")
+    // breaks the string scan, which is how comments slipped through before.
+    const comment = /\/\/|\/\*/.exec(line);
+    if (comment) spans.push([comment.index, line.length]);
+    return spans;
+}
+
+/** Fence languages whose contents are TypeScript. A bare generic inside a
+ *  python or json block is not a type error to fix — the first version rewrote
+ *  a comment inside a python block in a multi-language answer. */
+const TS_FENCE_LANG = /^\s*```\s*(ts|typescript|tsx)?\s*$/i;
+
+/** `Map<string, Array>` -> `Map<string, Array<any>>`, within code only.
+ *
+ *  `any` rather than `unknown` on purpose: `unknown` makes the file compile and
+ *  then breaks every use of the value, which trades one compile error for
+ *  several. This makes the code build; it does not make it well typed.
+ *
+ *  Scoped twice, both from adversarial review. Fenced output is repaired only
+ *  INSIDE its fences, because rewriting the surrounding prose inverts sentences
+ *  like "do not write Map<string, Array>". And no match inside a string literal
+ *  is touched, because that is a value, not a type. */
+function repairBareGenerics(code: string): { code: string; changed: boolean } {
+    let changed = false;
+    const spanRe = new RegExp(TS_BARE_GENERIC_RE.source, "g");
+
+    const repairLine = (line: string): string => {
+        const off_limits = protectedSpans(line);
+        return line.replace(spanRe, (span, offset: number) => {
+            if (off_limits.some(([a, b]) => offset >= a && offset < b)) return span;
+            const fixed = span.replace(
+                new RegExp(`\\b(${TS_GENERIC})\\b(?!\\s*<)`, "g"),
+                "$1<any>",
+            );
+            if (fixed !== span) changed = true;
+            return fixed;
+        });
+    };
+
+    const lines = code.split("\n");
+    const hasFences = /^\s*```/m.test(code);
+    let inFence = false;
+    let fenceIsTs = false;
+    const out = lines.map((line) => {
+        if (/^\s*```/.test(line)) {
+            if (!inFence) fenceIsTs = TS_FENCE_LANG.test(line);
+            inFence = !inFence;
+            return line;
+        }
+        // No fences at all: the whole output is the code block.
+        return (!hasFences || (inFence && fenceIsTs)) ? repairLine(line) : line;
+    });
+    return { code: out.join("\n"), changed };
+}
+
 export function applyDeterministicCodingRepairs(
     output: string,
     reason: string,
 ): DeterministicCodingRepairResult {
+    if (reason.startsWith("ts_static_contract:")) {
+        if (!reason.includes("bare_generic")) return { output, changes: [] };
+        const repaired = repairBareGenerics(output);
+        return repaired.changed
+            ? { output: repaired.code, changes: ["bare_generic"] }
+            : { output, changes: [] };
+    }
+
     if (!reason.startsWith("python_static_contract:")) {
         return { output, changes: [] };
     }
@@ -499,6 +597,9 @@ export function passesCodingQualityGate(
         if (pythonFailure) return { pass: false, reason: pythonFailure };
     }
 
+    const tsFailure = tsStaticContractFailure(code);
+    if (tsFailure) return { pass: false, reason: tsFailure };
+
     return { pass: true };
 }
 
@@ -525,6 +626,8 @@ const CODING_REPAIR_GUIDANCE: Readonly<Record<string, string>> = {
         "Define every directly called private self helper or replace the call with the correct defined helper.",
     constructor_attribute_missing_receiver:
         "In __init__, persist instance state as self.<attribute>; do not assign it to a discarded local variable.",
+    bare_generic:
+        "Every generic needs its type argument: write Array<T>, Map<K, V>, Set<T>, Promise<T> — never a bare Array, Map, Set or Promise in a type position.",
     dict_keys_unpack:
         "When unpacking key and value, iterate dictionary .items(); .keys() yields one key per iteration.",
 } as const;
