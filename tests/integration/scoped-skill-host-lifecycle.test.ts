@@ -20,6 +20,7 @@ let fixtureRoot: string;
 let agentsSkillsDir: string;
 let previousConfigPath: string | undefined;
 let previousHome: string | undefined;
+let previousUserProfile: string | undefined;
 let previousStorage: string | undefined;
 let previousForceLocal: string | undefined;
 let previousSyncDisabled: string | undefined;
@@ -157,10 +158,12 @@ beforeEach(async () => {
   agentsSkillsDir = join(fixtureRoot, ".agents", "skills");
   previousConfigPath = process.env.PRISM_CONFIG_PATH;
   previousHome = process.env.HOME;
+  previousUserProfile = process.env.USERPROFILE;
   previousStorage = process.env.PRISM_STORAGE;
   previousForceLocal = process.env.PRISM_FORCE_LOCAL;
   previousSyncDisabled = process.env.PRISM_SKILL_SYNC_DISABLED;
   process.env.HOME = fixtureRoot;
+  process.env.USERPROFILE = fixtureRoot;
   process.env.PRISM_CONFIG_PATH = join(fixtureRoot, "config.db");
   process.env.PRISM_STORAGE = "local";
   process.env.PRISM_FORCE_LOCAL = "true";
@@ -185,13 +188,15 @@ afterEach(async () => {
   else process.env.PRISM_CONFIG_PATH = previousConfigPath;
   if (previousHome === undefined) delete process.env.HOME;
   else process.env.HOME = previousHome;
+  if (previousUserProfile === undefined) delete process.env.USERPROFILE;
+  else process.env.USERPROFILE = previousUserProfile;
   if (previousStorage === undefined) delete process.env.PRISM_STORAGE;
   else process.env.PRISM_STORAGE = previousStorage;
   if (previousForceLocal === undefined) delete process.env.PRISM_FORCE_LOCAL;
   else process.env.PRISM_FORCE_LOCAL = previousForceLocal;
   if (previousSyncDisabled === undefined) delete process.env.PRISM_SKILL_SYNC_DISABLED;
   else process.env.PRISM_SKILL_SYNC_DISABLED = previousSyncDisabled;
-  await rm(fixtureRoot, { recursive: true, force: true });
+  await rm(fixtureRoot, { recursive: true, force: true, maxRetries: 8, retryDelay: 100 });
 });
 
 describe("scoped skill host lifecycle", () => {
