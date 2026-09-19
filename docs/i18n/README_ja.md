@@ -149,6 +149,17 @@ or by re-enabling after each run.
 <details>
 <summary>Release history (optional)</summary>
 
+## What's New in v20.21.8
+
+### Dashboard graphs use the authenticated Portal
+
+- The selected cloud project now shows its real session nodes and stored links
+  instead of collapsing to a keyword-only project bubble.
+- **Synthesize Edges** uses the authenticated Synalux Portal embedding contract;
+  the Prism dashboard process does not need a Google or Gemini API key.
+- Existing vectors and links are reused on repeat runs, synthesis fan-out is
+  bounded, and Portal failures are shown rather than rendered as an empty graph.
+
 ## What's New in v20.18.1
 
 ### Task skills survive compaction and update in place
