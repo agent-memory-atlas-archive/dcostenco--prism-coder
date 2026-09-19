@@ -110,6 +110,50 @@ export async function handleGraphRoutes(
     if (min_importance) params.importance = `gte.${parseInt(min_importance, 10)}`;
 
     const graphLimit = !project && !days && !min_importance ? 30 : 200;
+    if (project && s.getDashboardMemoryGraph) {
+      const graph = await s.getDashboardMemoryGraph({
+        project,
+        ...(createdAfter ? { createdAfter } : {}),
+        ...(min_importance ? { minImportance: parseInt(min_importance, 10) } : {}),
+        limit: graphLimit,
+      });
+      const now = Date.now();
+      const nodes = graph.nodes.map((row: any) => {
+        const accessedAt = row.last_accessed_at || row.created_at;
+        const daysSince = accessedAt
+          ? Math.max(0, Math.floor((now - new Date(accessedAt).getTime()) / (1000 * 60 * 60 * 24)))
+          : 999;
+        const baseImportance = typeof row.importance === "number" ? row.importance : 0;
+        return {
+          id: row.id,
+          label: typeof row.summary === "string" && row.summary.trim() ? row.summary.trim() : String(row.id),
+          group: "memory",
+          days_since_access: daysSince,
+          decayed_importance: baseImportance > 0
+            ? Math.round(baseImportance * Math.pow(0.95, daysSince) * 100) / 100
+            : 0,
+          base_importance: baseImportance,
+        };
+      });
+      const nodeIds = new Set(nodes.map(node => node.id));
+      const edges = graph.edges
+        .filter((edge: any) => nodeIds.has(edge.source_id) && nodeIds.has(edge.target_id))
+        .map((edge: any) => ({
+          from: edge.source_id,
+          to: edge.target_id,
+          label: edge.link_type,
+          value: typeof edge.strength === "number" ? edge.strength : 1,
+        }));
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({
+        graphType: "memory",
+        entryCount: nodes.length,
+        truncated: graph.truncated,
+        nodes,
+        edges,
+      }));
+      return true;
+    }
     const entries = s.getDashboardGraphEntries
       ? await s.getDashboardGraphEntries({
         ...(project ? { project } : {}),

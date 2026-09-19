@@ -123,9 +123,10 @@ vi.mock("../../src/utils/logger.js", () => ({
 }));
 
 // These additional mocks silence transitive imports pulled in by sessionMemoryHandlers.ts
-vi.mock("../../src/utils/llm/factory.js", () => ({
-  getLLMProvider: vi.fn(),
-}));
+vi.mock("../../src/utils/llm/factory.js", () => {
+  const provider = vi.fn();
+  return { getLLMProvider: provider, getEmbeddingProvider: provider };
+});
 vi.mock("../../src/utils/git.js", () => ({
   getCurrentGitState: vi.fn(),
   getGitDrift:        vi.fn(),

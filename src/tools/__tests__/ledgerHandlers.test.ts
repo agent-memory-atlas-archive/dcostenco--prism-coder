@@ -72,6 +72,9 @@ vi.mock("../../../src/utils/llm/factory.js", () => ({
   getLLMProvider: vi.fn(() => ({
     generateEmbedding: vi.fn(() => Promise.resolve(new Array(3072).fill(0.01))),
   })),
+  getEmbeddingProvider: vi.fn(() => ({
+    generateEmbedding: vi.fn(() => Promise.resolve(new Array(3072).fill(0.01))),
+  })),
 }));
 
 vi.mock("../../../src/utils/git.js", () => ({
@@ -174,7 +177,7 @@ vi.mock("../../../src/utils/vaultExporter.js", () => ({
 
 import { getStorage } from "../../../src/storage/index.js";
 import { getSetting, getAllSettings } from "../../../src/storage/configStorage.js";
-import { getLLMProvider } from "../../../src/utils/llm/factory.js";
+import { getEmbeddingProvider } from "../../../src/utils/llm/factory.js";
 import {
   registerContextLoaded,
   requireContextLoadedForProject,
@@ -195,7 +198,7 @@ import {
 const mockGetStorage = vi.mocked(getStorage);
 const mockGetSetting = vi.mocked(getSetting);
 const mockGetAllSettings = vi.mocked(getAllSettings);
-const mockGetLLMProvider = vi.mocked(getLLMProvider);
+const mockGetEmbeddingProvider = vi.mocked(getEmbeddingProvider);
 
 // ======================================================================
 // HELPERS — build a fresh storage stub per test
@@ -310,7 +313,7 @@ describe("ledgerHandlers", () => {
     });
 
     it("still returns persisted ledger success when optional embedding provider initialization throws", async () => {
-      mockGetLLMProvider.mockImplementationOnce(() => {
+      mockGetEmbeddingProvider.mockImplementationOnce(() => {
         throw new Error("GeminiAdapter requires GOOGLE_API_KEY");
       });
 
@@ -490,7 +493,7 @@ describe("ledgerHandlers", () => {
 
   describe("sessionSaveExperienceHandler", () => {
     it("still returns persisted experience success when optional embedding provider initialization throws", async () => {
-      mockGetLLMProvider.mockImplementationOnce(() => {
+      mockGetEmbeddingProvider.mockImplementationOnce(() => {
         throw new Error("GeminiAdapter requires GOOGLE_API_KEY");
       });
 
@@ -795,7 +798,7 @@ describe("ledgerHandlers", () => {
 
     it("still returns persisted success when optional embedding provider initialization throws", async () => {
       storage.saveHandoff.mockResolvedValue({ status: "updated", version: 16 });
-      mockGetLLMProvider.mockImplementationOnce(() => {
+      mockGetEmbeddingProvider.mockImplementationOnce(() => {
         throw new Error("GeminiAdapter requires GOOGLE_API_KEY");
       });
 

@@ -18,13 +18,22 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { _resetLLMProvider, getLLMProvider } from "../../src/utils/llm/factory.js";
+import { _resetLLMProvider, getEmbeddingProvider, getLLMProvider } from "../../src/utils/llm/factory.js";
 import { GeminiAdapter } from "../../src/utils/llm/adapters/gemini.js";
 import { OpenAIAdapter } from "../../src/utils/llm/adapters/openai.js";
 import { AnthropicAdapter } from "../../src/utils/llm/adapters/anthropic.js";
 import { VoyageAdapter } from "../../src/utils/llm/adapters/voyage.js";
 import { LocalEmbeddingAdapter } from "../../src/utils/llm/adapters/local.js";
 import { DisabledTextAdapter } from "../../src/utils/llm/adapters/disabledText.js";
+import { SynaluxEmbeddingAdapter } from "../../src/utils/llm/adapters/synalux.js";
+
+const storageState = vi.hoisted(() => ({ activeStorageBackend: "local" }));
+vi.mock("../../src/storage/index.js", () => storageState);
+vi.mock("../../src/utils/llm/adapters/synalux.js", () => ({
+  SynaluxEmbeddingAdapter: vi.fn(function (this: any) {
+    this.generateEmbedding = vi.fn().mockResolvedValue([1]);
+  }),
+}));
 
 // ─── Mocks ────────────────────────────────────────────────────────────────────
 // We mock getSettingSync so tests don't need a real SQLite DB.
@@ -111,6 +120,54 @@ describe("LLM Provider Factory — Split Architecture", () => {
   beforeEach(() => {
     _resetLLMProvider();
     vi.clearAllMocks();
+    storageState.activeStorageBackend = "local";
+  });
+
+  it("routes Synalux Gemini-space embeddings without constructing a local Google client", async () => {
+    storageState.activeStorageBackend = "synalux";
+    mockProviders("gemini");
+
+    const provider = getEmbeddingProvider();
+
+    await expect(provider.generateEmbedding("pos")).resolves.toEqual([1]);
+    expect(SynaluxEmbeddingAdapter).toHaveBeenCalledOnce();
+    expect(GeminiAdapter).not.toHaveBeenCalled();
+  });
+
+  it.each(["openai", "voyage", "local"])(
+    "keeps an explicit %s embedding provider independent from every text adapter",
+    (embeddingType) => {
+      storageState.activeStorageBackend = "synalux";
+      mockProviders("gemini", embeddingType);
+
+      const provider = getEmbeddingProvider();
+      const selected = {
+        openai: OpenAIAdapter,
+        voyage: VoyageAdapter,
+        local: LocalEmbeddingAdapter,
+      }[embeddingType as "openai" | "voyage" | "local"];
+
+      expect(provider.generateEmbedding).toBeTypeOf("function");
+      expect(selected).toHaveBeenCalledOnce();
+      expect(getEmbeddingProvider()).toBe(provider);
+      expect(selected).toHaveBeenCalledOnce();
+      expect(SynaluxEmbeddingAdapter).not.toHaveBeenCalled();
+      expect(GeminiAdapter).not.toHaveBeenCalled();
+      expect(AnthropicAdapter).not.toHaveBeenCalled();
+      expect(DisabledTextAdapter).not.toHaveBeenCalled();
+    },
+  );
+
+  it("does not replace a failed explicit embedding provider with Gemini", () => {
+    storageState.activeStorageBackend = "synalux";
+    mockProviders("none", "openai");
+    vi.mocked(OpenAIAdapter).mockImplementationOnce(function () {
+      throw new Error("Missing explicit OpenAI embedding credential");
+    });
+
+    expect(() => getEmbeddingProvider()).toThrow("Missing explicit OpenAI embedding credential");
+    expect(GeminiAdapter).not.toHaveBeenCalled();
+    expect(DisabledTextAdapter).not.toHaveBeenCalled();
   });
 
   // ── Default behavior ──────────────────────────────────────────────────────

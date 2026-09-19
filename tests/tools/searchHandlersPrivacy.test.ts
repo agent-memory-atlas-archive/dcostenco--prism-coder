@@ -25,9 +25,10 @@ vi.mock("../../src/utils/braveApi.js", () => ({
 vi.mock("../../src/utils/executor.js", () => ({
   runInSandbox: mockRunInSandbox,
 }));
-vi.mock("../../src/utils/llm/factory.js", () => ({
-  getLLMProvider: vi.fn(),
-}));
+vi.mock("../../src/utils/llm/factory.js", () => {
+  const provider = vi.fn();
+  return { getLLMProvider: provider, getEmbeddingProvider: provider };
+});
 vi.mock("../../src/scholar/webScholar.js", () => ({
   runWebScholar: vi.fn(),
 }));

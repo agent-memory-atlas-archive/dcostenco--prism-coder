@@ -90,11 +90,12 @@ vi.mock("../../src/utils/logger.js", () => ({
   debugLog: vi.fn(),
 }));
 
-vi.mock("../../src/utils/llm/factory.js", () => ({
-  getLLMProvider: vi.fn(() => ({
+vi.mock("../../src/utils/llm/factory.js", () => {
+  const provider = vi.fn(() => ({
     generateEmbedding: vi.fn(() => Promise.resolve(new Array(3072).fill(0.01))),
-  })),
-}));
+  }));
+  return { getLLMProvider: provider, getEmbeddingProvider: provider };
+});
 
 vi.mock("../../src/utils/git.js", () => ({
   getCurrentGitState: vi.fn(() => ({ isRepo: false })),

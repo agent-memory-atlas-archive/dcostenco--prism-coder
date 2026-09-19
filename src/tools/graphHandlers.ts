@@ -22,7 +22,7 @@ import { debugLog } from "../utils/logger.js";
 import { recordCognitiveRoute } from "../observability/graphMetrics.js";
 import { getStorage } from "../storage/index.js";
 import { toKeywordArray } from "../utils/keywordExtractor.js";
-import { getLLMProvider } from "../utils/llm/factory.js";
+import { getEmbeddingProvider, getLLMProvider } from "../utils/llm/factory.js";
 import { getCurrentGitState, getGitDrift } from "../utils/git.js";
 import { getSetting, getAllSettings } from "../storage/configStorage.js";
 import { mergeHandoff, dbToHandoffSchema, sanitizeForMerge } from "../utils/crdtMerge.js";
@@ -59,6 +59,8 @@ import {
   isDeepStoragePurgeArgs,
   isSessionIntuitiveRecallArgs,
   isSessionSynthesizeEdgesArgs,
+  SESSION_SYNTHESIS_MAX_ENTRIES,
+  SESSION_SYNTHESIS_MAX_NEIGHBORS_PER_ENTRY,
   isSessionCognitiveRouteArgs,
 } from "./sessionMemoryDefinitions.js";
 
@@ -483,6 +485,7 @@ export async function sessionSearchMemoryHandler(args: unknown) {
 
   // Step 1: Generate embedding for the search query
   let queryEmbedding: number[];
+  let storage: Awaited<ReturnType<typeof getStorage>>;
   // Phase 1: Start embedding latency timer — isolates Gemini API call time.
   // This is the most variable component: 50ms on a good day, 2000ms under load.
   const embeddingStart = performance.now();
@@ -519,7 +522,10 @@ export async function sessionSearchMemoryHandler(args: unknown) {
   }
 
   try {
-    queryEmbedding = await getLLMProvider().generateEmbedding(effectiveQuery);
+    // Resolve auto storage before provider selection so a cloud brain uses
+    // Portal-mediated embeddings even when context_boost is disabled.
+    storage = await getStorage();
+    queryEmbedding = await getEmbeddingProvider().generateEmbedding(effectiveQuery);
   } catch (err) {
     return {
       content: [{
@@ -535,7 +541,6 @@ export async function sessionSearchMemoryHandler(args: unknown) {
 
   // Step 2: Search via storage backend
   try {
-    const storage = await getStorage();
     // Phase 1: Start storage latency timer — isolates DB query time.
     // For Supabase: this measures the pgvector cosine distance RPC call.
     // For SQLite: this measures the local sqlite-vec similarity search.
@@ -1060,7 +1065,8 @@ export async function sessionIntuitiveRecallHandler(
   try {
     const { decodeSdmVector } = await import("../sdm/sdmDecoder.js");
 
-    const queryVector = await getLLMProvider().generateEmbedding(args.query);
+    await getStorage();
+    const queryVector = await getEmbeddingProvider().generateEmbedding(args.query);
     const sdmEngine = getSdmEngine(args.project);
     const targetVector = sdmEngine.read(new Float32Array(queryVector));
 
@@ -1234,13 +1240,33 @@ export async function synthesizeEdgesCore({
   max_neighbors_per_entry?: number;
   randomize_selection?: boolean;
 }) {
+  if (!Number.isFinite(similarity_threshold) || similarity_threshold < 0 || similarity_threshold > 1) {
+    throw new RangeError("similarity_threshold must be a finite number from 0 to 1");
+  }
+  if (!Number.isInteger(max_entries) || max_entries < 1 || max_entries > SESSION_SYNTHESIS_MAX_ENTRIES) {
+    throw new RangeError(`max_entries must be an integer from 1 to ${SESSION_SYNTHESIS_MAX_ENTRIES}`);
+  }
+  if (!Number.isInteger(max_neighbors_per_entry)
+      || max_neighbors_per_entry < 1
+      || max_neighbors_per_entry > SESSION_SYNTHESIS_MAX_NEIGHBORS_PER_ENTRY) {
+    throw new RangeError(
+      `max_neighbors_per_entry must be an integer from 1 to ${SESSION_SYNTHESIS_MAX_NEIGHBORS_PER_ENTRY}`,
+    );
+  }
+
   const storage = await getStorage();
-  const llm = getLLMProvider();
+  const llm = getEmbeddingProvider();
 
   try {
     let recentEntries: unknown[];
 
-    if (randomize_selection) {
+    if (storage.getGraphSynthesisEntries) {
+      recentEntries = await storage.getGraphSynthesisEntries({
+        project,
+        limit: max_entries,
+        randomize: randomize_selection,
+      });
+    } else if (randomize_selection) {
       // 1. Fetch up to 1000 IDs for the project
       const rawIds = await storage.getLedgerEntries({
         user_id: `eq.${PRISM_USER_ID}`,
@@ -1284,21 +1310,53 @@ export async function synthesizeEdgesCore({
     let entriesScanned = 0;
     let totalCandidates = 0;
     let totalBelow = 0;
+    let embeddingsCreated = 0;
+    let entriesWithoutText = 0;
+    const queryEmbeddings = new Map<string, string>();
+    const isCloudGraph = typeof storage.getGraphSynthesisEntries === "function";
+
+    // Populate every selected row before searching so the first row can match
+    // the rest of the same batch. The old single-pass loop skipped every
+    // legacy row that had neither vector representation.
+    for (const entry of recentEntries as any[]) {
+      if (!entry?.id) continue;
+      let queryEmbeddingStr = entry.embedding;
+      if (!queryEmbeddingStr) {
+        const textToEmbed = [entry.summary || "", ...(entry.decisions || [])].filter(Boolean).join(" | ");
+        if (!textToEmbed) {
+          entriesWithoutText++;
+          continue;
+        }
+        const generated = await llm.generateEmbedding(textToEmbed);
+        queryEmbeddingStr = JSON.stringify(generated);
+        await storage.patchLedger(entry.id, {
+          embedding: queryEmbeddingStr,
+          ...(isCloudGraph ? { only_if_missing: true } : {}),
+        });
+        embeddingsCreated++;
+      }
+      queryEmbeddings.set(entry.id, queryEmbeddingStr);
+    }
+
+    const existingTargets = new Map<string, Set<string>>();
+    if (storage.getDashboardMemoryGraph) {
+      const graph = await storage.getDashboardMemoryGraph({ project, limit: 500 });
+      for (const link of graph.edges as any[]) {
+        if (!existingTargets.has(link.source_id)) existingTargets.set(link.source_id, new Set());
+        existingTargets.get(link.source_id)!.add(link.target_id);
+      }
+    }
+    const linksToCreate: Array<{
+      source_id: string;
+      target_id: string;
+      link_type: "synthesized_from";
+      strength: number;
+    }> = [];
 
     for (const entry of recentEntries as any[]) {
       entriesScanned++;
-      let queryEmbeddingStr = entry.embedding;
-
-      // Handle compressed-only entries by regenerating the query vector
-      if (!queryEmbeddingStr) {
-        if (!entry.embedding_compressed) {
-          continue; // No semantic data available
-        }
-        const textToEmbed = [entry.summary || "", ...(entry.decisions || [])].filter(Boolean).join(" | ");
-        if (!textToEmbed) continue;
-        const generated = await llm.generateEmbedding(textToEmbed);
-        queryEmbeddingStr = JSON.stringify(generated);
-      }
+      const queryEmbeddingStr = queryEmbeddings.get(entry.id);
+      if (!queryEmbeddingStr) continue;
 
       let candidatesEvaluated = 0;
       let belowThreshold = 0;
@@ -1313,8 +1371,9 @@ export async function synthesizeEdgesCore({
       });
 
       // Get existing links to avoid duplicates
-      const existingLinks = await storage.getLinksFrom(entry.id, PRISM_USER_ID);
-      const existingTargetIds = new Set(existingLinks.map(l => l.target_id));
+      const existingTargetIds = storage.getDashboardMemoryGraph
+        ? (existingTargets.get(entry.id) ?? new Set<string>())
+        : new Set((await storage.getLinksFrom(entry.id, PRISM_USER_ID)).map(l => l.target_id));
 
       let neighborsFound = 0;
 
@@ -1337,13 +1396,13 @@ export async function synthesizeEdgesCore({
         if (existingTargetIds.has(match.id)) {
           skippedLinks++;
         } else {
-          await storage.createLink({
+          linksToCreate.push({
             source_id: entry.id,
             target_id: match.id,
             link_type: 'synthesized_from',
             strength: Math.max(0, Math.min(1, match.similarity)),
-          }, PRISM_USER_ID);
-          newLinks++;
+          });
+          existingTargetIds.add(match.id);
         }
       }
 
@@ -1351,9 +1410,20 @@ export async function synthesizeEdgesCore({
       totalBelow += belowThreshold;
     }
 
+    if (linksToCreate.length > 0) {
+      if (storage.createLinks) {
+        await storage.createLinks(linksToCreate, PRISM_USER_ID);
+      } else {
+        for (const link of linksToCreate) await storage.createLink(link, PRISM_USER_ID);
+      }
+      newLinks = linksToCreate.length;
+    }
+
     return {
       success: true,
       entriesScanned,
+      embeddingsCreated,
+      entriesWithoutText,
       totalCandidates,
       totalBelow,
       skippedLinks,

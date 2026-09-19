@@ -34,8 +34,8 @@ vi.mock("../../src/storage/index.js", () => ({
 }));
 
 // Mock LLM factory — synthesis uses generateEmbedding, test-me uses generateText
-vi.mock("../../src/utils/llm/factory.js", () => ({
-  getLLMProvider: vi.fn(() => ({
+vi.mock("../../src/utils/llm/factory.js", () => {
+  const provider = vi.fn(() => ({
     generateEmbedding: vi.fn(async () => [0.1, 0.2, 0.3]),
     generateText: vi.fn(async () =>
       JSON.stringify([
@@ -44,8 +44,9 @@ vi.mock("../../src/utils/llm/factory.js", () => ({
         { q: "Q3", a: "A3" },
       ])
     ),
-  })),
-}));
+  }));
+  return { getLLMProvider: provider, getEmbeddingProvider: provider };
+});
 
 // ─── Import mocked modules ──────────────────────────────────────
 const { getStorage } = await import("../../src/storage/index.js");
@@ -86,9 +87,142 @@ describe("knowledgeSearchHandler", () => {
 // SYNTHESIS — synthesizeEdgesCore
 // ═══════════════════════════════════════════════════════════════════
 
+describe("semantic-search initialization order", () => {
+  it("waits for auto storage resolution before constructing the embedding provider", async () => {
+    vi.clearAllMocks();
+    const { getEmbeddingProvider } = await import("../../src/utils/llm/factory.js");
+    let resolveStorage!: (value: unknown) => void;
+    const pendingStorage = new Promise(resolve => { resolveStorage = resolve; });
+    const storage = { searchMemory: vi.fn().mockResolvedValue([]) };
+    vi.mocked(getStorage).mockImplementationOnce(() => pendingStorage as any);
+    vi.mocked(getEmbeddingProvider).mockReturnValueOnce({
+      generateEmbedding: vi.fn().mockResolvedValue([1, 2, 3]),
+    });
+
+    const search = graphHandlers.sessionSearchMemoryHandler({ query: "pos" });
+    await Promise.resolve();
+    expect(getEmbeddingProvider).not.toHaveBeenCalled();
+
+    resolveStorage(storage);
+    await search;
+    expect(getEmbeddingProvider).toHaveBeenCalledOnce();
+    expect(storage.searchMemory).toHaveBeenCalledOnce();
+  });
+});
+
 describe("synthesizeEdgesCore", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  it.each([
+    [{ max_entries: 51 }, "max_entries must be an integer from 1 to 50"],
+    [{ max_entries: 1.5 }, "max_entries must be an integer from 1 to 50"],
+    [{ max_neighbors_per_entry: 6 }, "max_neighbors_per_entry must be an integer from 1 to 5"],
+    [{ max_neighbors_per_entry: 0 }, "max_neighbors_per_entry must be an integer from 1 to 5"],
+    [{ similarity_threshold: Number.NaN }, "similarity_threshold must be a finite number from 0 to 1"],
+    [{ similarity_threshold: 1.1 }, "similarity_threshold must be a finite number from 0 to 1"],
+  ])("rejects invalid synthesis bounds before storage or embedding work: %o", async (invalid, message) => {
+    const { getEmbeddingProvider } = await import("../../src/utils/llm/factory.js");
+
+    await expect(graphHandlers.synthesizeEdgesCore({
+      project: "p",
+      ...invalid,
+    })).rejects.toThrow(message);
+
+    expect(getStorage).not.toHaveBeenCalled();
+    expect(getEmbeddingProvider).not.toHaveBeenCalled();
+  });
+
+  it("embeds legacy cloud rows before searching and batches their new links", async () => {
+    const events: string[] = [];
+    const storageMock = {
+      getGraphSynthesisEntries: vi.fn(async () => [
+        { id: "a", summary: "graph synthesis first", decisions: [] },
+        { id: "b", summary: "graph synthesis second", decisions: [] },
+      ]),
+      patchLedger: vi.fn(async (id: string) => { events.push(`patch:${id}`); }),
+      searchMemory: vi.fn(async ({ queryEmbedding }: { queryEmbedding: string }) => {
+        events.push(`search:${queryEmbedding}`);
+        return queryEmbedding === JSON.stringify([0.1, 0.2, 0.3])
+          ? [{ id: "b", similarity: 0.91 }]
+          : [{ id: "a", similarity: 0.91 }];
+      }),
+      getDashboardMemoryGraph: vi.fn(async () => ({ nodes: [], edges: [], truncated: false })),
+      createLinks: vi.fn(async (links: unknown[]) => { events.push(`links:${links.length}`); }),
+      getLinksFrom: vi.fn(() => { throw new Error("cloud synthesis must use the bounded graph snapshot"); }),
+      createLink: vi.fn(() => { throw new Error("cloud synthesis must batch link writes"); }),
+    };
+    (getStorage as any).mockResolvedValue(storageMock);
+    const { getEmbeddingProvider } = await import("../../src/utils/llm/factory.js");
+    vi.mocked(getEmbeddingProvider).mockReturnValueOnce({
+      generateEmbedding: vi.fn()
+        .mockResolvedValueOnce([0.1, 0.2, 0.3])
+        .mockResolvedValueOnce([0.3, 0.2, 0.1]),
+    });
+
+    const out = await graphHandlers.synthesizeEdgesCore({
+      project: "synalux-pos",
+      max_entries: 2,
+      max_neighbors_per_entry: 1,
+      randomize_selection: true,
+    });
+
+    expect(out).toMatchObject({ success: true, entriesScanned: 2, embeddingsCreated: 2, newLinks: 2 });
+    expect(storageMock.patchLedger).toHaveBeenNthCalledWith(1, "a", {
+      embedding: JSON.stringify([0.1, 0.2, 0.3]),
+      only_if_missing: true,
+    });
+    expect(storageMock.patchLedger).toHaveBeenNthCalledWith(2, "b", {
+      embedding: JSON.stringify([0.3, 0.2, 0.1]),
+      only_if_missing: true,
+    });
+    expect(events.indexOf("patch:b")).toBeLessThan(events.findIndex(event => event.startsWith("search:")));
+    expect(storageMock.createLinks).toHaveBeenCalledOnce();
+    expect(storageMock.createLinks).toHaveBeenCalledWith(expect.arrayContaining([
+      expect.objectContaining({ source_id: "a", target_id: "b", link_type: "synthesized_from" }),
+      expect.objectContaining({ source_id: "b", target_id: "a", link_type: "synthesized_from" }),
+    ]), "default");
+  });
+
+  it("reuses stored cloud vectors and existing links on a repeated synthesis", async () => {
+    const generateEmbedding = vi.fn(() => { throw new Error("stored vectors must be reused"); });
+    const storageMock = {
+      getGraphSynthesisEntries: vi.fn(async () => [
+        { id: "a", summary: "first", embedding: "[0.1,0.2,0.3]" },
+        { id: "b", summary: "second", embedding: "[0.3,0.2,0.1]" },
+      ]),
+      patchLedger: vi.fn(() => { throw new Error("stored vectors must not be patched"); }),
+      searchMemory: vi.fn(async ({ queryEmbedding }: { queryEmbedding: string }) =>
+        queryEmbedding === "[0.1,0.2,0.3]"
+          ? [{ id: "b", similarity: 0.91 }]
+          : [{ id: "a", similarity: 0.91 }]),
+      getDashboardMemoryGraph: vi.fn(async () => ({
+        nodes: [],
+        edges: [
+          { source_id: "a", target_id: "b", link_type: "synthesized_from", strength: 0.91 },
+          { source_id: "b", target_id: "a", link_type: "synthesized_from", strength: 0.91 },
+        ],
+        truncated: false,
+      })),
+      createLinks: vi.fn(() => { throw new Error("existing links must not be rewritten"); }),
+      getLinksFrom: vi.fn(() => { throw new Error("cloud synthesis must use the graph snapshot"); }),
+      createLink: vi.fn(() => { throw new Error("cloud synthesis must batch link writes"); }),
+    };
+    (getStorage as any).mockResolvedValue(storageMock);
+    const { getEmbeddingProvider } = await import("../../src/utils/llm/factory.js");
+    vi.mocked(getEmbeddingProvider).mockReturnValueOnce({ generateEmbedding });
+
+    const out = await graphHandlers.synthesizeEdgesCore({
+      project: "synalux-pos", max_entries: 2, max_neighbors_per_entry: 1,
+    });
+
+    expect(out).toMatchObject({
+      success: true, entriesScanned: 2, embeddingsCreated: 0, skippedLinks: 2, newLinks: 0,
+    });
+    expect(generateEmbedding).not.toHaveBeenCalled();
+    expect(storageMock.patchLedger).not.toHaveBeenCalled();
+    expect(storageMock.createLinks).not.toHaveBeenCalled();
   });
 
   /**

@@ -1470,6 +1470,9 @@ export function isMaintenanceVacuumArgs(
 
 // ─── v6.0 Phase 3: Edge Synthesis (On-Demand) ───────────────────────
 
+export const SESSION_SYNTHESIS_MAX_ENTRIES = 50;
+export const SESSION_SYNTHESIS_MAX_NEIGHBORS_PER_ENTRY = 5;
+
 export const SESSION_SYNTHESIZE_EDGES_TOOL: Tool = {
   name: "session_synthesize_edges",
   description:
@@ -1490,10 +1493,14 @@ export const SESSION_SYNTHESIZE_EDGES_TOOL: Tool = {
       },
       max_entries: {
         type: "integer",
+        minimum: 1,
+        maximum: SESSION_SYNTHESIS_MAX_ENTRIES,
         description: "Maximum number of recent entries to scan as sources. Default: 50. Max cap: 50.",
       },
       max_neighbors_per_entry: {
         type: "integer",
+        minimum: 1,
+        maximum: SESSION_SYNTHESIS_MAX_NEIGHBORS_PER_ENTRY,
         description: "Maximum number of links to synthesize per source entry. Default: 3. Max cap: 5.",
       },
       randomize_selection: {
@@ -1519,9 +1526,24 @@ export function isSessionSynthesizeEdgesArgs(
   if (typeof args !== "object" || args === null) return false;
   const a = args as Record<string, unknown>;
   if (typeof a.project !== "string") return false;
-  if (a.similarity_threshold !== undefined && typeof a.similarity_threshold !== "number") return false;
-  if (a.max_entries !== undefined && typeof a.max_entries !== "number") return false;
-  if (a.max_neighbors_per_entry !== undefined && typeof a.max_neighbors_per_entry !== "number") return false;
+  if (a.similarity_threshold !== undefined && (
+    typeof a.similarity_threshold !== "number" ||
+    !Number.isFinite(a.similarity_threshold) ||
+    a.similarity_threshold < 0 ||
+    a.similarity_threshold > 1
+  )) return false;
+  if (a.max_entries !== undefined && (
+    typeof a.max_entries !== "number" ||
+    !Number.isInteger(a.max_entries) ||
+    a.max_entries < 1 ||
+    a.max_entries > SESSION_SYNTHESIS_MAX_ENTRIES
+  )) return false;
+  if (a.max_neighbors_per_entry !== undefined && (
+    typeof a.max_neighbors_per_entry !== "number" ||
+    !Number.isInteger(a.max_neighbors_per_entry) ||
+    a.max_neighbors_per_entry < 1 ||
+    a.max_neighbors_per_entry > SESSION_SYNTHESIS_MAX_NEIGHBORS_PER_ENTRY
+  )) return false;
   if (a.randomize_selection !== undefined && typeof a.randomize_selection !== "boolean") return false;
   return true;
 }

@@ -11,9 +11,10 @@ import * as os from "os";
 
 // ─── Mock all external dependencies ──────────────────────────────────────────
 
-vi.mock("../../src/utils/llm/factory.js", () => ({
-  getLLMProvider: vi.fn(),
-}));
+vi.mock("../../src/utils/llm/factory.js", () => {
+  const provider = vi.fn();
+  return { getLLMProvider: provider, getEmbeddingProvider: provider };
+});
 vi.mock("../../src/storage/index.js", () => ({
   getStorage: vi.fn(),
 }));

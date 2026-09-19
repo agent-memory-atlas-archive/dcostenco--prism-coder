@@ -937,6 +937,7 @@ export function renderDashboardHTML(version: string): string {
             </button>
           </div>
 
+          <div id="graphDataNote" style="display:none;margin:0.6rem 0;color:var(--text-muted);font-size:0.8rem"></div>
           <div id="network-container">Loading nodes...</div>
           
           <!-- Graph Maintenance Actions -->
@@ -2879,7 +2880,7 @@ function getDecayColor(daysSince, decayedImportance, group, baseImportance) {
 // ─── Neural Graph (v2.3.0 / v5.1 / v6.2 Decay Heatmap) ───
 function loadGraph() {
     return __awaiter(this, void 0, void 0, function () {
-        var container, proj, days, imp, qs, url, res, data, dens, graduatedNodes, denPercentage, dens, MAX_NODES, priority, kept, options, network, allNodes, allEdges, isFiltered, graphTitle, statsSpan, projectCount, kwCount, e_11;
+        var container, proj, days, imp, qs, url, res, data, graphDataNote, dens, graduatedNodes, denPercentage, dens, MAX_NODES, priority, kept, options, network, allNodes, allEdges, isFiltered, graphTitle, statsSpan, projectCount, kwCount, e_11;
         return __generator(this, function (_a) {
             switch (_a.label) {
                 case 0:
@@ -2906,6 +2907,15 @@ function loadGraph() {
                     return [4 /*yield*/, res.json()];
                 case 3:
                     data = _a.sent();
+                    if (!res.ok || data.error)
+                        throw new Error(data.error || 'Unable to load graph');
+                    graphDataNote = document.getElementById('graphDataNote');
+                    if (graphDataNote) {
+                        graphDataNote.style.display = data.graphType === 'memory' ? 'block' : 'none';
+                        graphDataNote.textContent = data.graphType === 'memory'
+                            ? 'Session memory graph: recorded sessions and stored links.' + (data.truncated ? ' Showing a limited subset.' : '') + (data.edges.length === 0 ? ' No stored links connect the displayed sessions yet.' : '')
+                            : '';
+                    }
                     // Empty state — no ledger entries yet
                     if (data.nodes.length === 0) {
                         container.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:0.85rem">No knowledge associations found yet.</div>';
@@ -2917,7 +2927,10 @@ function loadGraph() {
                     graduatedNodes = data.nodes.filter(function (n) { return (n.value || 0) >= 7; }).length;
                     denPercentage = Math.round((graduatedNodes / data.nodes.length) * 100);
                     dens = document.getElementById('densityStatContainer');
-                    if (dens) {
+                    if (dens && data.graphType === 'memory') {
+                        dens.style.display = 'none';
+                    }
+                    else if (dens) {
                         dens.style.display = 'block';
                         dens.innerHTML = '<strong>Memory Density:</strong> ' + denPercentage + '% <span title="Ratio of Highly-Reinforced (Graduated) knowledge vs raw concepts" style="cursor:help">🧠</span> (' + graduatedNodes + ' / ' + data.nodes.length + ' ideas graduated)';
                     }
@@ -2973,6 +2986,11 @@ function loadGraph() {
                                 color: { background: '#1e293b', border: '#334155' },
                                 size: 6,
                                 font: { size: 10, color: '#64748b' }
+                            },
+                            memory: {
+                                color: { background: '#8b5cf6', border: '#a78bfa' },
+                                size: 9,
+                                font: { size: 10, color: '#cbd5e1' }
                             }
                         },
                         physics: {
@@ -3068,7 +3086,9 @@ function loadGraph() {
                         }
                         projectCount = allNodes.filter(function (n) { return n.group === 'project'; }).length;
                         kwCount = allNodes.filter(function (n) { return n.group === 'keyword'; }).length;
-                        statsSpan.textContent = projectCount + ' projects · ' + kwCount + ' keywords · ' + allEdges.length + ' edges';
+                        statsSpan.textContent = data.graphType === 'memory'
+                            ? allNodes.length + ' sessions · ' + allEdges.length + ' stored links'
+                            : projectCount + ' projects · ' + kwCount + ' keywords · ' + allEdges.length + ' edges';
                     }
                     return [3 /*break*/, 5];
                 case 4:
@@ -3172,7 +3192,7 @@ function triggerEdgeSynthesis() {
                     else {
                         showToast('❌ Edge Synthesis Error: ' + (data.error || 'Failed'), true);
                         if (status)
-                            status.textContent = '❌ Failed';
+                            status.textContent = '❌ ' + (data.error || 'Synthesis failed');
                     }
                     return [3 /*break*/, 6];
                 case 4:
