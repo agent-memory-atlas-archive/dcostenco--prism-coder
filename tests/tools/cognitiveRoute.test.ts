@@ -146,12 +146,13 @@ vi.mock("../../src/config.js", () => ({
 vi.mock("../../src/utils/logger.js", () => ({
   sanitizeForLog: vi.fn((s: string) => s), debugLog: vi.fn() }));
 vi.mock("../../src/utils/keywordExtractor.js", () => ({ toKeywordArray: vi.fn(() => []) }));
-vi.mock("../../src/utils/llm/factory.js", () => ({
-  getLLMProvider: vi.fn(() => ({
+vi.mock("../../src/utils/llm/factory.js", () => {
+  const provider = vi.fn(() => ({
     generateEmbedding: vi.fn(async () => [0.1, 0.2, 0.3]),
     generateText: vi.fn(async () => "[]"),
-  })),
-}));
+  }));
+  return { getLLMProvider: provider, getEmbeddingProvider: provider };
+});
 vi.mock("../../src/utils/git.js", () => ({
   getCurrentGitState: vi.fn(() => null),
   getGitDrift: vi.fn(() => null),

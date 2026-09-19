@@ -12,6 +12,35 @@ afterEach(() => {
 });
 
 describe('dashboard graph node cap', () => {
+  it('labels a cloud memory graph as sessions and stored links', async () => {
+    const nodes = [
+      { id: 'a', label: 'First session', group: 'memory', value: 1 },
+      { id: 'b', label: 'Second session', group: 'memory', value: 1 },
+    ];
+    const edges = [{ from: 'a', to: 'b', label: 'synthesized_from' }];
+    const page = new JSDOM(renderDashboardHTML('test'), { runScripts: 'outside-only' });
+    pages.push(page);
+    page.window.vis = { Network: class { on() {} } } as never;
+    page.window.fetch = (async (input: string | URL | Request) => {
+      if (String(input).includes('/api/graph')) {
+        return new Response(JSON.stringify({ graphType: 'memory', entryCount: 2, nodes, edges }), {
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      if (String(input).includes('/api/projects')) {
+        return new Response(JSON.stringify({ projects: [] }), { headers: { 'content-type': 'application/json' } });
+      }
+      return new Response('{}', { headers: { 'content-type': 'application/json' } });
+    }) as typeof page.window.fetch;
+
+    for (const script of page.window.document.querySelectorAll('script:not([src])')) {
+      page.window.eval(script.textContent || '');
+    }
+    await new Promise(resolve => setTimeout(resolve, 25));
+
+    expect(page.window.document.querySelector('.graph-stats')?.textContent).toBe('2 sessions · 1 stored links');
+  });
+
   it('retains the selected project hub and its edge when keyword nodes exceed the cap', async () => {
     const project: GraphNode = { id: 'synalux-portal', label: 'synalux-portal', group: 'project', value: 1 };
     const category: GraphNode = { id: 'category-1', label: 'category-1', group: 'category', value: 1 };

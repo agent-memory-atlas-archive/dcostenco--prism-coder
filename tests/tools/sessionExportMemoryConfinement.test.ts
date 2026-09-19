@@ -52,7 +52,10 @@ vi.mock("../../src/config.js", () => ({
 }));
 vi.mock("../../src/utils/logger.js", () => ({
   sanitizeForLog: vi.fn((s: string) => s), debugLog: vi.fn() }));
-vi.mock("../../src/utils/llm/factory.js", () => ({ getLLMProvider: vi.fn() }));
+vi.mock("../../src/utils/llm/factory.js", () => {
+  const provider = vi.fn();
+  return { getLLMProvider: provider, getEmbeddingProvider: provider };
+});
 vi.mock("../../src/utils/git.js", () => ({
   getCurrentGitState: vi.fn(),
   getGitDrift:        vi.fn(),

@@ -335,6 +335,26 @@ export interface StorageBackend {
     limit: number;
   }): Promise<unknown[]>;
 
+  /** Authenticated session/link graph for cloud dashboard project views. */
+  getDashboardMemoryGraph?(params: {
+    project: string;
+    createdAfter?: string;
+    minImportance?: number;
+    includeEmbeddings?: boolean;
+    limit: number;
+  }): Promise<{
+    nodes: Array<Record<string, unknown>>;
+    edges: Array<Record<string, unknown>>;
+    truncated: boolean;
+  }>;
+
+  /** Bounded entries used by cloud edge synthesis without direct DB access. */
+  getGraphSynthesisEntries?(params: {
+    project: string;
+    limit: number;
+    randomize: boolean;
+  }): Promise<unknown[]>;
+
   /**
    * Delete ledger entries matching filter criteria.
    * Used by knowledge_forget to prune old entries.
@@ -718,6 +738,9 @@ export interface StorageBackend {
    * Supabase routes through prism_create_link SECURITY DEFINER RPC.
    */
   createLink(link: MemoryLink, userId: string): Promise<void>;
+
+  /** Optional atomic/batched link transport for remote storage backends. */
+  createLinks?(links: MemoryLink[], userId: string): Promise<void>;
 
   /**
    * Delete a link by composite key (source_id, target_id, link_type).

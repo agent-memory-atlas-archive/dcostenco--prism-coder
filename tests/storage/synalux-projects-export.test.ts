@@ -346,3 +346,72 @@ describe("SynaluxStorage — dashboard graph ledger", () => {
     await expect(s.getDashboardGraphEntries({ limit: 30 })).rejects.toThrow("ledger[] is required");
   });
 });
+
+describe("SynaluxStorage — memory graph and link transport", () => {
+  const fetchMock = vi.fn();
+  let SynaluxStorage: typeof import("../../src/storage/synalux.js")["SynaluxStorage"];
+
+  beforeEach(async () => {
+    vi.stubGlobal("fetch", fetchMock);
+    fetchMock.mockReset();
+    SynaluxStorage = await importFreshSynaluxStorage();
+  });
+  afterEach(() => { vi.unstubAllGlobals(); });
+
+  it("reads the authenticated session graph with bounded filters", async () => {
+    fetchMock.mockResolvedValueOnce(freshJwtResp()).mockResolvedValueOnce(jsonResponse(200, {
+      status: "ok",
+      nodes: [{ id: "a", project: "demo", summary: "one", keywords: [], created_at: "2026-09-19" }],
+      edges: [],
+      truncated: false,
+    }));
+    const s = new SynaluxStorage();
+    await expect(s.getDashboardMemoryGraph({
+      project: "demo",
+      createdAfter: "2026-09-01T00:00:00.000Z",
+      minImportance: 1,
+      limit: 200,
+    })).resolves.toMatchObject({ nodes: [{ id: "a" }], edges: [], truncated: false });
+    expect(String(fetchMock.mock.calls[1][0])).toContain(
+      "/api/v1/prism/graph?project=demo&limit=200&created_after=2026-09-01T00%3A00%3A00.000Z&min_importance=1",
+    );
+  });
+
+  it("requests full synthesis rows and normalizes stored vector arrays", async () => {
+    fetchMock.mockResolvedValueOnce(freshJwtResp()).mockResolvedValueOnce(jsonResponse(200, {
+      status: "ok",
+      nodes: [{ id: "a", project: "demo", summary: "full", decisions: [], embedding: [0.1, 0.2] }],
+      edges: [],
+      truncated: false,
+    }));
+    const s = new SynaluxStorage();
+    await expect(s.getGraphSynthesisEntries({ project: "demo", limit: 1, randomize: false }))
+      .resolves.toMatchObject([{ id: "a", embedding: "[0.1,0.2]" }]);
+    expect(String(fetchMock.mock.calls[1][0])).toContain("include_embeddings=true");
+  });
+
+  it("batches synthesized links through Portal instead of direct Supabase", async () => {
+    fetchMock.mockResolvedValueOnce(freshJwtResp()).mockResolvedValueOnce(jsonResponse(200, {
+      status: "success", upserted: 2,
+    }));
+    const s = new SynaluxStorage();
+    const links = [
+      { source_id: "11111111-1111-4111-8111-111111111111", target_id: "22222222-2222-4222-8222-222222222222", link_type: "synthesized_from" as const, strength: 0.9 },
+      { source_id: "22222222-2222-4222-8222-222222222222", target_id: "11111111-1111-4111-8111-111111111111", link_type: "synthesized_from" as const, strength: 0.9 },
+    ];
+    await expect(s.createLinks(links, "ignored-client-user")).resolves.toBeUndefined();
+    expect(JSON.parse((fetchMock.mock.calls[1][1] as RequestInit).body as string)).toEqual({ edges: links });
+  });
+
+  it("reads outbound links through the caller-scoped Portal route", async () => {
+    fetchMock.mockResolvedValueOnce(freshJwtResp()).mockResolvedValueOnce(jsonResponse(200, {
+      status: "success",
+      links: [{ source_id: "11111111-1111-4111-8111-111111111111", target_id: "22222222-2222-4222-8222-222222222222", link_type: "synthesized_from", strength: 0.8, metadata: { reason: "similar" } }],
+    }));
+    const s = new SynaluxStorage();
+    await expect(s.getLinksFrom("11111111-1111-4111-8111-111111111111", "ignored", 0.7, 3)).resolves.toEqual([
+      expect.objectContaining({ target_id: "22222222-2222-4222-8222-222222222222", metadata: JSON.stringify({ reason: "similar" }) }),
+    ]);
+    expect(String(fetchMock.mock.calls[1][0])).toContain("/api/v1/prism/graph/edge?source_id=11111111-1111-4111-8111-111111111111&min_strength=0.7&limit=3");
+  });
+});

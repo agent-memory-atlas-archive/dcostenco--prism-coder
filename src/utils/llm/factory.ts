@@ -50,9 +50,12 @@ import { LocalEmbeddingAdapter } from "./adapters/local.js";
 import { DisabledTextAdapter } from "./adapters/disabledText.js";
 import { TracingLLMProvider } from "./adapters/traced.js";
 import { sanitizeForLog } from "../logger.js";
+import { SynaluxEmbeddingAdapter } from "./adapters/synalux.js";
+import { activeStorageBackend } from "../../storage/index.js";
 
 // Module-level singleton — one composed provider per MCP server process.
 let providerInstance: LLMProvider | null = null;
+let embeddingInstance: Pick<LLMProvider, "generateEmbedding"> | null = null;
 
 // ─── Adapter Builders ─────────────────────────────────────────────────────────
 // Separated from getLLMProvider() so they can be called independently for the
@@ -193,13 +196,44 @@ export function getLLMProvider(): LLMProvider {
 }
 
 /**
+ * Resolve embeddings without constructing an unrelated text/vision provider.
+ *
+ * Synalux storage keeps Gemini's existing semantic-similarity vector space but
+ * moves the provider credential, entitlement check, and metering to Portal.
+ * Every explicitly selected non-Gemini provider remains local/direct; silently
+ * substituting a different 768-dimensional vector space would corrupt search.
+ */
+export function getEmbeddingProvider(): Pick<LLMProvider, "generateEmbedding"> {
+  if (embeddingInstance) return embeddingInstance;
+
+  const textType = resolveProviderSetting("PRISM_TEXT_PROVIDER", "text_provider", "gemini");
+  let embedType = resolveProviderSetting("PRISM_EMBEDDING_PROVIDER", "embedding_provider", "auto");
+  if (embedType === "auto") {
+    embedType = textType === "anthropic" ? "gemini" : textType;
+  }
+
+  const configuredStorage = process.env.PRISM_STORAGE?.trim().toLowerCase();
+  const useSynalux = (activeStorageBackend === "synalux" || configuredStorage === "synalux")
+    && embedType === "gemini";
+  const adapter = useSynalux
+    ? new SynaluxEmbeddingAdapter()
+    : buildEmbeddingAdapter(embedType);
+  const providerName = useSynalux ? "synalux" : embedType;
+
+  embeddingInstance = new TracingLLMProvider(adapter, providerName);
+  return embeddingInstance;
+}
+
+/**
  * Reset the cached singleton.
  * ONLY for unit tests — never call in production code.
  */
 export function _resetLLMProvider(): void {
   providerInstance = null;
+  embeddingInstance = null;
 }
 
 export function _setLLMProviderForTest(mock: LLMProvider): void {
   providerInstance = mock;
+  embeddingInstance = mock;
 }

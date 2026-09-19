@@ -114,7 +114,7 @@ describe("SynaluxStorage — JWT exchange + caching", () => {
       todos: [],
       files_changed: [],
       decisions: [],
-      keywords: [],
+      keywords: ["graph", "embeddings"],
     });
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
@@ -127,6 +127,10 @@ describe("SynaluxStorage — JWT exchange + caching", () => {
     expect(memoryCall[0]).toBe(`${PORTAL_URL}/api/v1/prism/memory`);
     expect((memoryCall[1] as RequestInit).headers).toMatchObject({
       "Authorization": "Bearer jwt-1",
+    });
+    expect(JSON.parse((memoryCall[1] as RequestInit).body as string)).toMatchObject({
+      action: "save_ledger",
+      keywords: ["graph", "embeddings"],
     });
   });
 

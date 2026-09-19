@@ -29,7 +29,7 @@
 
 import * as fs from "fs";
 import * as nodePath from "path";
-import { getLLMProvider } from "./llm/factory.js";
+import { getEmbeddingProvider, getLLMProvider } from "./llm/factory.js";
 import { getStorage } from "../storage/index.js";
 import { debugLog, sanitizeForLog } from "./logger.js";
 import { PRISM_USER_ID } from "../config.js";
@@ -245,12 +245,12 @@ async function captionImageAsync(
   // ── Step 6: Embed the caption inline ────────────────────────────────
   // We embed the caption directly here rather than calling backfillEmbeddingsHandler
   // to avoid a circular import (imageCaptioner ↔ sessionMemoryHandlers).
-  // We already have getLLMProvider() in scope, so the embed cost is near-zero.
+  // The dedicated embedding resolver is cached, so this does not rebuild providers.
   try {
     const embedText = ocrText
       ? `[Visual Memory: ${imageId}] Description: ${userContext}. Caption: ${caption}. OCR: ${ocrText}`
       : `[Visual Memory: ${imageId}] Description: ${userContext}. Caption: ${caption}`;
-    const embedding = await llm.generateEmbedding(embedText);
+    const embedding = await getEmbeddingProvider().generateEmbedding(embedText);
 
     // Find the ledger entry we just saved and patch its embedding
     const allEntries = await storage.getLedgerEntries({

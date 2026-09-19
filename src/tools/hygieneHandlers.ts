@@ -17,9 +17,9 @@
  */
 
 import { debugLog } from "../utils/logger.js";
-import { getStorage } from "../storage/index.js";
+import { activeStorageBackend, getStorage } from "../storage/index.js";
 import { toKeywordArray } from "../utils/keywordExtractor.js";
-import { getLLMProvider } from "../utils/llm/factory.js";
+import { getEmbeddingProvider } from "../utils/llm/factory.js";
 import { getCurrentGitState, getGitDrift } from "../utils/git.js";
 import { getSetting, getAllSettings } from "../storage/configStorage.js";
 import { mergeHandoff, dbToHandoffSchema, sanitizeForMerge } from "../utils/crdtMerge.js";
@@ -91,15 +91,17 @@ export async function backfillEmbeddingsHandler(args: unknown) {
     throw new Error("Invalid arguments for session_backfill_embeddings");
   }
 
-  // Validate that an embedding provider is available (supports Gemini, OpenAI, etc.)
+  // Storage auto-resolution must happen first: it decides whether Gemini-space
+  // vectors are generated locally or through the authenticated Synalux Portal.
+  const storage = await getStorage();
+  let embeddingProvider: ReturnType<typeof getEmbeddingProvider>;
   try {
-    getLLMProvider();
+    embeddingProvider = getEmbeddingProvider();
   } catch (providerErr) {
     return {
       content: [{
         type: "text",
-        text: "❌ Cannot backfill: No embedding provider available. " +
-              "Configure an API key in the dashboard Settings → AI Providers tab.",
+        text: `Cannot backfill embeddings: ${providerErr instanceof Error ? providerErr.message : String(providerErr)}`,
       }],
       isError: true,
     };
@@ -112,8 +114,6 @@ export async function backfillEmbeddingsHandler(args: unknown) {
     `[backfill_embeddings] ${dry_run ? "DRY RUN: " : ""}` +
     `project=${project || "all"}, limit=${safeLimit}`
   );
-
-  const storage = await getStorage();
 
   // Find entries missing embeddings. Prefer the dedicated method: the old
   // PostgREST-param path below goes through getLedgerEntries, which
@@ -187,11 +187,12 @@ export async function backfillEmbeddingsHandler(args: unknown) {
         continue;
       }
 
-      const embedding = await getLLMProvider().generateEmbedding(textToEmbed);
+      const embedding = await embeddingProvider.generateEmbedding(textToEmbed);
 
       // Build atomic patch — float32 + TurboQuant in ONE DB update
       const patchData: Record<string, unknown> = {
         embedding: JSON.stringify(embedding),
+        ...(activeStorageBackend === "synalux" ? { only_if_missing: true } : {}),
       };
 
       // TurboQuant: compress alongside repair (non-fatal)

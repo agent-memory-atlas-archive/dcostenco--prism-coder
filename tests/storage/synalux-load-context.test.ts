@@ -57,6 +57,27 @@ describe("SynaluxStorage.loadContext", () => {
     return { result, request };
   }
 
+  it("forwards only_if_missing without forwarding local-only embedding columns", async () => {
+    fetchMock
+      .mockResolvedValueOnce(response({ status: "success", jwt: "jwt-1", expires_in: 900 }))
+      .mockResolvedValueOnce(response({ status: "success" }));
+    const Storage = await importStorage();
+
+    await new Storage().patchLedger("entry-fixture", {
+      embedding: JSON.stringify(Array(768).fill(0.1)),
+      only_if_missing: true,
+      embedding_compressed: "local-only",
+    });
+
+    const payload = JSON.parse((fetchMock.mock.calls[1][1] as RequestInit).body as string);
+    expect(payload).toMatchObject({
+      action: "save_embedding",
+      memory_id: "entry-fixture",
+      only_if_missing: true,
+    });
+    expect(payload).not.toHaveProperty("embedding_compressed");
+  });
+
   it.each(["quick", "standard", "deep"])("sends the selected %s depth to the portal", async (level) => {
     const { request } = await load({ status: "success", context: null }, level);
     expect(request).toMatchObject({ action: "load_context", project: "prism-mcp", level, role: "dev" });

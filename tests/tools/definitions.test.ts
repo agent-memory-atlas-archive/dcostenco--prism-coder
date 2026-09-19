@@ -33,7 +33,9 @@ import {
   isSessionLoadContextArgs,
   isSessionExportMemoryArgs,
   isSessionForgetMemoryArgs,
+  isSessionSynthesizeEdgesArgs,
   SESSION_EXPORT_MEMORY_TOOL,
+  SESSION_SYNTHESIZE_EDGES_TOOL,
 } from "../../src/tools/sessionMemoryDefinitions.js";
 import {
   AGENT_REGISTER_TOOL,
@@ -220,6 +222,44 @@ describe("isSessionLoadContextArgs", () => {
     } else {
       expect.unreachable("Should pass guard");
     }
+  });
+});
+
+describe("session_synthesize_edges bounds", () => {
+  it("publishes the same caps enforced by the runtime", () => {
+    const properties = SESSION_SYNTHESIZE_EDGES_TOOL.inputSchema.properties as Record<string, any>;
+    expect(properties.max_entries).toMatchObject({ type: "integer", minimum: 1, maximum: 50 });
+    expect(properties.max_neighbors_per_entry).toMatchObject({ type: "integer", minimum: 1, maximum: 5 });
+  });
+
+  it("accepts both documented boundaries", () => {
+    expect(isSessionSynthesizeEdgesArgs({
+      project: "prism",
+      similarity_threshold: 0,
+      max_entries: 1,
+      max_neighbors_per_entry: 1,
+    })).toBe(true);
+    expect(isSessionSynthesizeEdgesArgs({
+      project: "prism",
+      similarity_threshold: 1,
+      max_entries: 50,
+      max_neighbors_per_entry: 5,
+    })).toBe(true);
+  });
+
+  it.each([
+    ["max_entries above the cap", { max_entries: 51 }],
+    ["max_entries below one", { max_entries: 0 }],
+    ["fractional max_entries", { max_entries: 1.5 }],
+    ["non-finite max_entries", { max_entries: Number.POSITIVE_INFINITY }],
+    ["neighbors above the cap", { max_neighbors_per_entry: 6 }],
+    ["neighbors below one", { max_neighbors_per_entry: 0 }],
+    ["fractional neighbors", { max_neighbors_per_entry: 2.5 }],
+    ["negative threshold", { similarity_threshold: -0.01 }],
+    ["threshold above one", { similarity_threshold: 1.01 }],
+    ["non-finite threshold", { similarity_threshold: Number.NaN }],
+  ])("rejects %s", (_label, invalid) => {
+    expect(isSessionSynthesizeEdgesArgs({ project: "prism", ...invalid })).toBe(false);
   });
 });
 

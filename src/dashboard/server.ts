@@ -31,7 +31,7 @@ import { renderDashboardHTML } from "./ui.js";
 import { computeIntentHealth } from "./intentHealth.js";
 import { getAllSettings, setSetting, getSetting, getSettingSync } from "../storage/configStorage.js";
 import { compactLedgerHandler } from "../tools/compactionHandler.js";
-import { getLLMProvider } from "../utils/llm/factory.js";
+import { getEmbeddingProvider } from "../utils/llm/factory.js";
 import { buildVaultDirectory } from "../utils/vaultExporter.js";
 import { redactSettings } from "../tools/commonHelpers.js";
 import { handleGraphRoutes } from "./graphRouter.js";
@@ -1074,7 +1074,7 @@ return false;}
           // Check LLM provider availability before attempting embedding
           let llm;
           try {
-            llm = getLLMProvider();
+            llm = getEmbeddingProvider();
           } catch {
             res.writeHead(503, { "Content-Type": "application/json" });
             return res.end(JSON.stringify({ error: "LLM Provider not configured for semantic search. Configure an embedding provider in the Mind Palace dashboard." }));

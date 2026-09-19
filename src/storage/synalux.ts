@@ -62,6 +62,7 @@ import type {
   SpreadingActivationOptions,
   HistorySnapshot,
   HealthStats,
+  MemoryLink,
 } from "./interface.js";
 
 /**
@@ -250,6 +251,46 @@ export class SynaluxStorage extends SupabaseStorage {
     return data;
   }
 
+  /** GET through the same short-lived JWT boundary as portalPost. */
+  private async portalGet(path: string): Promise<Record<string, unknown>> {
+    const url = `${this.baseUrl}${path}`;
+    const send = async (jwt: string): Promise<Response> => {
+      try {
+        return await fetch(url, {
+          headers: {
+            "Authorization": `Bearer ${jwt}`,
+            "X-Prism-Client": "prism-mcp-thin-client",
+          },
+          signal: AbortSignal.timeout(30_000),
+          redirect: "error",
+        });
+      } catch (err) {
+        throw new Error(
+          `[SynaluxStorage] Network error calling ${url}: ${err instanceof Error ? err.message : String(err)}`
+        );
+      }
+    };
+
+    let jwt = await this.ensureJwt();
+    let res = await send(jwt);
+    if (res.status === 401) {
+      this.cachedJwt = null;
+      this.cachedJwtExpiresAt = 0;
+      jwt = await this.ensureJwt();
+      res = await send(jwt);
+    }
+    let data: Record<string, unknown>;
+    try {
+      data = await res.json() as Record<string, unknown>;
+    } catch {
+      throw new Error(`[SynaluxStorage] Invalid JSON from ${url} (status ${res.status})`);
+    }
+    if (!res.ok || data.status === "error") {
+      throw new Error(`[SynaluxStorage] ${path} failed: ${data.error || `HTTP ${res.status}`}`);
+    }
+    return data;
+  }
+
   // ─── Ledger ──────────────────────────────────────────────────
 
   async saveLedger(entry: LedgerEntry): Promise<unknown> {
@@ -261,6 +302,7 @@ export class SynaluxStorage extends SupabaseStorage {
       decisions: entry.decisions,
       todos: entry.todos,
       files_changed: entry.files_changed,
+      keywords: entry.keywords,
       role: entry.role,
       event_type: entry.event_type,
       confidence_score: entry.confidence_score,
@@ -523,6 +565,7 @@ export class SynaluxStorage extends SupabaseStorage {
       action: "save_embedding",
       memory_id: id,
       embedding: vector,
+      ...(data.only_if_missing === true ? { only_if_missing: true } : {}),
     });
   }
 
@@ -596,6 +639,113 @@ export class SynaluxStorage extends SupabaseStorage {
       throw new Error("Dashboard graph contract drift: ledger[] is required");
     }
     return result.ledger;
+  }
+
+  async getDashboardMemoryGraph(params: {
+    project: string;
+    createdAfter?: string;
+    minImportance?: number;
+    includeEmbeddings?: boolean;
+    limit: number;
+  }): Promise<{ nodes: Array<Record<string, unknown>>; edges: Array<Record<string, unknown>>; truncated: boolean }> {
+    const project = params.project.trim();
+    if (!project || project.length > 100) throw new Error("Invalid dashboard memory graph project");
+    if (!Number.isInteger(params.limit) || params.limit < 1 || params.limit > 500) {
+      throw new Error("Invalid dashboard memory graph limit");
+    }
+    if (params.createdAfter !== undefined
+      && (Number.isNaN(new Date(params.createdAfter).getTime())
+        || new Date(params.createdAfter).toISOString() !== params.createdAfter)) {
+      throw new Error("Invalid dashboard memory graph timestamp");
+    }
+    if (params.minImportance !== undefined
+      && (!Number.isInteger(params.minImportance)
+        || params.minImportance < -2147483648 || params.minImportance > 2147483647)) {
+      throw new Error("Invalid dashboard memory graph importance");
+    }
+    const query = new URLSearchParams({ project, limit: String(params.limit) });
+    if (params.createdAfter !== undefined) query.set("created_after", params.createdAfter);
+    if (params.minImportance !== undefined) query.set("min_importance", String(params.minImportance));
+    if (params.includeEmbeddings === true) query.set("include_embeddings", "true");
+    const result = await this.portalGet(`/api/v1/prism/graph?${query.toString()}`);
+    if (!Array.isArray(result.nodes) || !Array.isArray(result.edges)) {
+      throw new Error("Dashboard memory graph contract drift: nodes[] and edges[] are required");
+    }
+    return {
+      nodes: result.nodes as Array<Record<string, unknown>>,
+      edges: result.edges as Array<Record<string, unknown>>,
+      truncated: result.truncated === true,
+    };
+  }
+
+  async getGraphSynthesisEntries(params: {
+    project: string;
+    limit: number;
+    randomize: boolean;
+  }): Promise<unknown[]> {
+    if (!Number.isInteger(params.limit) || params.limit < 1 || params.limit > 200) {
+      throw new Error("Invalid graph synthesis limit");
+    }
+    const graph = await this.getDashboardMemoryGraph({
+      project: params.project,
+      limit: params.randomize ? 200 : params.limit,
+      includeEmbeddings: true,
+    });
+    const entries = graph.nodes.map(entry => ({
+      ...entry,
+      ...(Array.isArray(entry.embedding) ? { embedding: JSON.stringify(entry.embedding) } : {}),
+    }));
+    if (params.randomize) {
+      for (let index = entries.length - 1; index > 0; index--) {
+        const swap = Math.floor(Math.random() * (index + 1));
+        [entries[index], entries[swap]] = [entries[swap], entries[index]];
+      }
+    }
+    return entries.slice(0, params.limit);
+  }
+
+  async createLinks(links: MemoryLink[], _userId: string): Promise<void> {
+    if (links.length === 0) return;
+    const edges = links.map(link => {
+      let metadata: unknown = undefined;
+      if (link.metadata) {
+        try { metadata = JSON.parse(link.metadata); }
+        catch { throw new Error("createLinks: metadata must be valid JSON"); }
+      }
+      return {
+        source_id: link.source_id,
+        target_id: link.target_id,
+        link_type: link.link_type,
+        strength: Math.max(0, Math.min(1, link.strength)),
+        ...(metadata !== undefined ? { metadata } : {}),
+      };
+    });
+    await this.portalPost("/api/v1/prism/graph/edge", { edges });
+  }
+
+  async createLink(link: MemoryLink, userId: string): Promise<void> {
+    await this.createLinks([link], userId);
+  }
+
+  async getLinksFrom(sourceId: string, _userId: string, minStrength = 0, limit = 25): Promise<MemoryLink[]> {
+    const query = new URLSearchParams({
+      source_id: sourceId,
+      min_strength: String(minStrength),
+      limit: String(limit),
+    });
+    const result = await this.portalGet(`/api/v1/prism/graph/edge?${query.toString()}`);
+    if (!Array.isArray(result.links)) {
+      throw new Error("Graph links contract drift: links[] is required");
+    }
+    return result.links.map((row: any) => ({
+      source_id: row.source_id,
+      target_id: row.target_id,
+      link_type: row.link_type,
+      strength: row.strength,
+      metadata: row.metadata ? JSON.stringify(row.metadata) : undefined,
+      created_at: row.created_at,
+      last_traversed_at: row.last_traversed_at,
+    })) as MemoryLink[];
   }
 
   // ─── Project inventory + export ──────────────────────────────
