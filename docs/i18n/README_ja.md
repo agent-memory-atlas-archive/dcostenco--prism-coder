@@ -159,6 +159,12 @@ or by re-enabling after each run.
   the Prism dashboard process does not need a Google or Gemini API key.
 - Existing vectors and links are reused on repeat runs, synthesis fan-out is
   bounded, and Portal failures are shown rather than rendered as an empty graph.
+- **Account & Settings** now shows the current user, role, and Free, Standard,
+  Advanced, or Enterprise plan, with visible sign-in, upgrade, billing, and
+  sign-out actions.
+- A selected paid plan survives the Portal sign-in round trip, live and test
+  Stripe catalogs resolve every paid tier, and localized checkout never reuses
+  a USD Price for another currency.
 
 ## What's New in v20.18.1
 

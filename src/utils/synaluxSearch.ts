@@ -25,6 +25,7 @@ import {
   PRISM_SYNALUX_API_KEY,
   PRISM_SYNALUX_BASE_URL,
 } from "../config.js";
+import { isSynaluxSignedOut, setSynaluxSignedOut } from "./synaluxCredentialState.js";
 
 // ─── Public availability flag ────────────────────────────────
 
@@ -79,6 +80,7 @@ export function resolvePortalBaseUrl(): string | undefined {
 
 /** The subscription key, resolved the one way every portal client resolves it. */
 export function usablePortalKey(): string | undefined {
+  if (isSynaluxSignedOut()) return undefined;
   return usableEnvValue(process.env.PRISM_SYNALUX_API_KEY) ?? PRISM_SYNALUX_API_KEY;
 }
 
@@ -93,6 +95,12 @@ export async function hydrateSynaluxCredentials(
   getSetting: (key: string, fallback: string) => Promise<string>,
 ): Promise<boolean> {
   try {
+    const signedOut = (await getSetting("PRISM_SYNALUX_SIGNED_OUT", "")) === "true";
+    setSynaluxSignedOut(signedOut);
+    if (signedOut) {
+      delete process.env.PRISM_SYNALUX_API_KEY;
+      return false;
+    }
     const baseUrl =
       usableEnvValue(process.env.PRISM_SYNALUX_BASE_URL)
       ?? usableEnvValue(process.env.SYNALUX_BASE_URL)
@@ -190,6 +198,9 @@ async function portalPost<T>(path: string, body: Record<string, unknown>, timeou
   const url = `${baseUrl}${path}`;
 
   const send = async (jwt: string): Promise<Response> => {
+    if (isSynaluxSignedOut()) {
+      throw new Error("[synaluxSearch] Synalux account is signed out");
+    }
     return fetch(url, {
       method: "POST",
       headers: {
@@ -208,6 +219,9 @@ async function portalPost<T>(path: string, body: Record<string, unknown>, timeou
   }
 
   let res = await send(jwt);
+  if (isSynaluxSignedOut()) {
+    throw new Error("[synaluxSearch] Synalux account is signed out");
+  }
 
   // Retry once on 401 (stale JWT)
   if (res.status === 401) {
@@ -218,6 +232,9 @@ async function portalPost<T>(path: string, body: Record<string, unknown>, timeou
       throw new Error("[synaluxSearch] JWT re-exchange failed after 401");
     }
     res = await send(jwt);
+    if (isSynaluxSignedOut()) {
+      throw new Error("[synaluxSearch] Synalux account is signed out");
+    }
   }
 
   if (!res.ok) {
@@ -227,7 +244,11 @@ async function portalPost<T>(path: string, body: Record<string, unknown>, timeou
     throw new PortalHttpError(path, res.status, text);
   }
 
-  return (await res.json()) as T;
+  const data = (await res.json()) as T;
+  if (isSynaluxSignedOut()) {
+    throw new Error("[synaluxSearch] Synalux account is signed out");
+  }
+  return data;
 }
 
 // ─── Public API ──────────────────────────────────────────────

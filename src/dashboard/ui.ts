@@ -413,8 +413,11 @@ export function renderDashboardHTML(version: string): string {
     .identity-chip:hover { border-color: var(--accent-purple); color: var(--accent-purple); background: rgba(139,92,246,0.2); }
     .identity-chip .role-icon { font-size: 0.9rem; }
     .identity-chip .identity-label { max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .identity-chip .plan-mini { font-size: 0.58rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--accent-green); }
+    .main-tabs { overflow-x: auto; scrollbar-width: thin; }
+    .main-tabs .s-tab { flex: 0 0 auto; }
     /* Settings modal tab bar */
-    .settings-tabs { display: flex; gap: 0; border-bottom: 1px solid var(--border-glass); margin: 0 -1.5rem 1.2rem; padding: 0 1.5rem; }
+    .settings-tabs { display: flex; gap: 0; border-bottom: 1px solid var(--border-glass); margin: 0 -1.5rem 1.2rem; padding: 0 1.5rem; overflow-x: auto; scrollbar-width: thin; }
     .s-tab { padding: 0.55rem 1.1rem; font-size: 0.85rem; font-weight: 500; color: var(--text-secondary); cursor: pointer;
       border-bottom: 2px solid transparent; transition: all 0.2s; background: none; border-top: none; border-left: none; border-right: none; }
     .s-tab.active { color: var(--accent-purple); border-bottom-color: var(--accent-purple); }
@@ -450,7 +453,7 @@ export function renderDashboardHTML(version: string): string {
     .modal-overlay.active { display: flex; }
     .modal {
       background: var(--bg-secondary); border: 1px solid var(--border-glow);
-      border-radius: var(--radius); padding: 2rem; width: 480px; max-width: 90vw;
+      border-radius: var(--radius); padding: 2rem; width: 680px; max-width: 90vw;
       max-height: 85vh; overflow-y: auto; position: relative;
     }
     .modal h2 { font-size: 1.1rem; margin-bottom: 1.5rem; display: flex; align-items: center; gap: 0.5rem; }
@@ -496,6 +499,60 @@ export function renderDashboardHTML(version: string): string {
       font-size: 0.6rem; padding: 0.15rem 0.5rem; border-radius: 4px;
       background: rgba(245,158,11,0.15); color: var(--accent-amber);
       font-weight: 600; text-transform: uppercase;
+    }
+    .account-shell { display: grid; gap: 1rem; }
+    .account-card {
+      padding: 1.25rem; border: 1px solid rgba(139,92,246,0.28); border-radius: var(--radius);
+      background: linear-gradient(145deg, rgba(139,92,246,0.12), rgba(6,182,212,0.05));
+    }
+    .account-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; }
+    .account-badges { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-bottom: 0.7rem; }
+    .account-badge {
+      display: inline-flex; align-items: center; min-height: 24px; padding: 0.15rem 0.6rem;
+      border-radius: 999px; font-size: 0.66rem; font-weight: 700; letter-spacing: 0.07em; text-transform: uppercase;
+      color: var(--accent-green); background: rgba(16,185,129,0.12); border: 1px solid rgba(16,185,129,0.25);
+    }
+    .account-badge.role { color: var(--accent-cyan); background: rgba(6,182,212,0.1); border-color: rgba(6,182,212,0.22); }
+    .account-badge.managed { color: var(--accent-amber); background: rgba(245,158,11,0.1); border-color: rgba(245,158,11,0.22); }
+    .account-name { font-size: 1.35rem; line-height: 1.2; font-weight: 700; color: var(--text-primary); }
+    .account-summary { margin-top: 0.45rem; color: var(--text-secondary); font-size: 0.82rem; line-height: 1.55; max-width: 540px; }
+    .account-actions { display: flex; flex-wrap: wrap; gap: 0.65rem; margin-top: 1rem; }
+    .account-action {
+      min-height: 42px; padding: 0.62rem 1rem; border-radius: 9px; border: 1px solid var(--border-glass);
+      color: white; background: var(--gradient-hero); font: 600 0.82rem var(--font-sans); cursor: pointer;
+    }
+    .account-action:hover { opacity: 0.92; transform: translateY(-1px); }
+    .account-action.secondary { color: var(--text-primary); background: var(--bg-hover); }
+    .account-action.danger { color: #f87171; background: rgba(239,68,68,0.08); border-color: rgba(239,68,68,0.32); }
+    .account-action:disabled { opacity: 0.55; cursor: wait; transform: none; }
+    .account-connect {
+      padding: 1rem; border: 1px solid var(--border-glass); border-radius: var(--radius-sm); background: rgba(15,23,42,0.42);
+    }
+    .account-connect label { display: block; margin-bottom: 0.45rem; color: var(--text-primary); font-size: 0.8rem; font-weight: 600; }
+    .account-code-row { display: flex; gap: 0.6rem; }
+    .account-code-input {
+      flex: 1; min-width: 0; padding: 0.65rem 0.75rem; border-radius: 8px; border: 1px solid var(--border-glass);
+      background: var(--bg-primary); color: var(--text-primary); font: 0.78rem var(--font-mono);
+    }
+    .account-code-input:focus { outline: none; border-color: var(--accent-purple); }
+    .account-status { min-height: 1.1rem; margin-top: 0.6rem; color: var(--text-muted); font-size: 0.74rem; line-height: 1.45; }
+    .account-status.error { color: #fb7185; }
+    .account-status.success { color: var(--accent-green); }
+    .plan-ladder { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0.55rem; }
+    .plan-step { padding: 0.65rem 0.5rem; border: 1px solid var(--border-glass); border-radius: 8px; text-align: center; color: var(--text-muted); }
+    .plan-step.current { border-color: rgba(16,185,129,0.55); background: rgba(16,185,129,0.08); color: var(--text-primary); }
+    .plan-step strong { display: block; font-size: 0.74rem; text-transform: uppercase; letter-spacing: 0.04em; }
+    .plan-step span { display: block; margin-top: 0.2rem; font-size: 0.64rem; }
+    .account-loading { padding: 2rem 1rem; text-align: center; color: var(--text-muted); }
+    @media (max-width: 600px) {
+      .modal-overlay { align-items: flex-end; }
+      .modal { width: 100%; max-width: 100vw; max-height: 92vh; border-radius: 18px 18px 0 0; padding: 1.25rem; }
+      .settings-tabs { margin-left: -0.75rem; margin-right: -0.75rem; padding: 0 0.75rem; }
+      .s-tab { flex: 0 0 auto; padding-left: 0.8rem; padding-right: 0.8rem; }
+      .account-card-head { display: block; }
+      .account-code-row { flex-direction: column; }
+      .account-code-row .account-action { width: 100%; }
+      .plan-ladder { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     }
 
     /* ─── Hivemind Radar (v3.0) ─── */
@@ -705,7 +762,7 @@ export function renderDashboardHTML(version: string): string {
         <span class="version-badge">v${version}</span>
       </div>
       <div class="selector">
-        <span class="identity-chip" id="identityChip" onclick="openSettings()" title="Agent Identity — click to change"></span>
+        <span class="identity-chip" id="identityChip" onclick="openSettings()" title="Account & Subscription"></span>
         <select id="projectSelect">
           <option value="">Loading projects...</option>
         </select>
@@ -1335,18 +1392,26 @@ export function renderDashboardHTML(version: string): string {
     <div class="modal-overlay" id="settingsModal">
       <div class="modal">
         <button class="modal-close" onclick="closeSettings()">✕</button>
-        <h2>⚙️ Settings</h2>
+        <h2>👤 Account &amp; Settings</h2>
 
         <!-- Tab bar -->
         <div class="settings-tabs">
-          <button class="s-tab active" id="stab-settings" onclick="switchSettingsTab('settings')">⚙️ Settings</button>
+          <button class="s-tab active" id="stab-account" onclick="switchSettingsTab('account')">👤 Account</button>
+          <button class="s-tab" id="stab-settings" onclick="switchSettingsTab('settings')">⚙️ Preferences</button>
           <button class="s-tab" id="stab-skills" onclick="switchSettingsTab('skills')">📜 Skills</button>
           <button class="s-tab" id="stab-providers" onclick="switchSettingsTab('providers')">🤖 AI Providers</button>
           <button class="s-tab" id="stab-observability" onclick="switchSettingsTab('observability')">🔭 Observability</button>
         </div>
 
+        <!-- Account panel -->
+        <div class="s-tab-panel active" id="spanel-account">
+          <div id="accountPanel" class="account-shell" aria-live="polite">
+            <div class="account-loading">Loading account…</div>
+          </div>
+        </div>
+
         <!-- Settings panel (existing content) -->
-        <div class="s-tab-panel active" id="spanel-settings">
+        <div class="s-tab-panel" id="spanel-settings">
 
         <div class="setting-section">Runtime Settings</div>
 
@@ -1998,45 +2063,192 @@ if (_searchInput)
 var _searchBoost = document.getElementById('searchContextBoost');
 if (_searchBoost)
     _searchBoost.addEventListener('change', performSearch);
-// Role icon map
-var ROLE_ICONS = { dev: '🛠️', qa: '🔍', pm: '📋', lead: '🏗️', security: '🔒', ux: '🎨', global: '🌐', cmo: '📢' };
-// Load and render the identity chip from settings
-function loadIdentityChip() {
-    return __awaiter(this, void 0, void 0, function () {
-        var res, data, s, role, name, chip, icon, label, e_1;
-        return __generator(this, function (_a) {
-            switch (_a.label) {
-                case 0:
-                    _a.trys.push([0, 3, , 4]);
-                    return [4 /*yield*/, fetch('/api/settings')];
-                case 1:
-                    res = _a.sent();
-                    return [4 /*yield*/, res.json()];
-                case 2:
-                    data = _a.sent();
-                    s = data.settings || {};
-                    role = s.default_role || '';
-                    name = s.agent_name || '';
-                    chip = document.getElementById('identityChip');
-                    if (!chip)
-                        return [2 /*return*/];
-                    if (role && role !== 'global' || name) {
-                        icon = ROLE_ICONS[role] || '🤖';
-                        label = name ? (role && role !== 'global' ? role + ' · ' + name : name) : role;
-                        chip.innerHTML = '<span class="role-icon">' + icon + '</span><span class="identity-label">' + escapeHtml(label) + '</span>';
-                        chip.style.display = 'flex';
-                    }
-                    else {
-                        chip.style.display = 'none';
-                    }
-                    return [3 /*break*/, 4];
-                case 3:
-                    e_1 = _a.sent();
-                    return [3 /*break*/, 4];
-                case 4: return [2 /*return*/];
-            }
-        });
+var currentAccount = null;
+function accountPlanLabel(plan) {
+    var labels = { free: 'Free', standard: 'Standard', advanced: 'Advanced', enterprise: 'Enterprise' };
+    return labels[plan] || 'Free';
+}
+function accountPlanSummary(plan) {
+    var summaries = {
+        free: 'Local memory, local models, and the Mind Palace dashboard remain available without an account.',
+        standard: 'Cloud sync and paid Prism services are active for this account.',
+        advanced: 'Advanced cloud capacity and team features are active for this account.',
+        enterprise: 'Enterprise capacity, governance, and support are active for this account.'
+    };
+    return summaries[plan] || summaries.free;
+}
+function renderPlanLadder(plan) {
+    var tiers = [
+        ['free', 'Free', 'Local'],
+        ['standard', 'Standard', 'Cloud'],
+        ['advanced', 'Advanced', 'Teams'],
+        ['enterprise', 'Enterprise', 'Scale']
+    ];
+    return '<div class="plan-ladder" aria-label="Prism plans">' + tiers.map(function (tier) {
+        return '<div class="plan-step' + (tier[0] === plan ? ' current' : '') + '">' +
+            '<strong>' + tier[1] + '</strong><span>' + tier[2] + '</span></div>';
+    }).join('') + '</div>';
+}
+function renderAccountChip(account, error) {
+    var chip = document.getElementById('identityChip');
+    if (!chip)
+        return;
+    if (error) {
+        chip.innerHTML = '<span class="role-icon">⚠️</span><span class="identity-label">Account</span>';
+    }
+    else if (account && account.signed_in) {
+        chip.innerHTML = '<span class="role-icon">🤖</span><span class="identity-label">' + escapeHtml(account.name || 'Synalux user') + '</span>' +
+            '<span class="plan-mini">' + escapeHtml(accountPlanLabel(account.plan)) + '</span>';
+    }
+    else {
+        chip.innerHTML = '<span class="role-icon">🆓</span><span class="identity-label">Free</span>';
+    }
+    chip.style.display = 'flex';
+}
+function renderAccountPanel(account, error) {
+    var panel = document.getElementById('accountPanel');
+    var role;
+    var billingLabel;
+    var managedBadge;
+    if (!panel)
+        return;
+    if (error) {
+        panel.innerHTML = '<div class="account-card">' +
+            '<div class="account-badges"><span class="account-badge role">Connection issue</span></div>' +
+            '<div class="account-name">Account temporarily unavailable</div>' +
+            '<div class="account-summary">' + escapeHtml(error) + '</div>' +
+            '<div class="account-actions"><button class="account-action" onclick="loadIdentityChip()">Retry</button>' +
+            '<button class="account-action secondary" onclick="startAccountSignIn()">Sign in again</button></div></div>' +
+            renderPlanLadder('');
+        return;
+    }
+    if (!account || !account.signed_in) {
+        panel.innerHTML = '<div class="account-card">' +
+            '<div class="account-card-head"><div><div class="account-badges">' +
+            '<span class="account-badge">Free</span><span class="account-badge role">Local</span></div>' +
+            '<div class="account-name">Prism Free</div><div class="account-summary">' + accountPlanSummary('free') +
+            ' Sign in to add cloud sync, larger models, and team features.</div></div></div>' +
+            '<div class="account-actions"><button class="account-action" onclick="startAccountSignIn()">Sign in</button>' +
+            '<button class="account-action secondary" onclick="openAccountBilling()">View plans</button></div></div>' +
+            '<div class="account-connect"><label for="accountCodeInput">Complete sign-in with a one-time code</label>' +
+            '<div class="account-code-row"><input class="account-code-input" id="accountCodeInput" autocomplete="off" spellcheck="false" placeholder="synalux_code_…" />' +
+            '<button class="account-action" id="accountConnectButton" onclick="connectAccount()">Connect account</button></div>' +
+            '<div class="account-status" id="accountStatus">Sign in opens Synalux in a new tab. Paste the code shown there.</div></div>' +
+            renderPlanLadder('free');
+        return;
+    }
+    role = account.role_key || 'user';
+    billingLabel = account.billing && account.billing.action === 'manage' ? 'Manage subscription' :
+        account.billing && account.billing.action === 'included' ? 'View plans' : 'Upgrade plan';
+    managedBadge = account.plan_source === 'managed' ? '<span class="account-badge managed">Managed</span>' : '';
+    panel.innerHTML = '<div class="account-card"><div class="account-card-head"><div>' +
+        '<div class="account-badges"><span class="account-badge">' + escapeHtml(accountPlanLabel(account.plan)) + '</span>' +
+        '<span class="account-badge role">' + escapeHtml(role) + '</span>' + managedBadge + '</div>' +
+        '<div class="account-name">' + escapeHtml(account.name || 'Synalux user') + '</div>' +
+        '<div class="account-summary">' + accountPlanSummary(account.plan) + '</div></div></div>' +
+        '<div class="account-actions"><button class="account-action" id="accountBillingButton" onclick="openAccountBilling()">' + billingLabel + '</button>' +
+        '<button class="account-action danger" id="accountSignOutButton" onclick="signOutAccount()">Sign out</button></div>' +
+        '<div class="account-status" id="accountStatus"></div></div>' + renderPlanLadder(account.plan);
+}
+function setAccountStatus(message, kind) {
+    var status = document.getElementById('accountStatus');
+    if (!status)
+        return;
+    status.textContent = message || '';
+    status.className = 'account-status' + (kind ? ' ' + kind : '');
+}
+function setAccountBusy(busy) {
+    ['accountConnectButton', 'accountBillingButton', 'accountSignOutButton'].forEach(function (id) {
+        var button = document.getElementById(id);
+        if (button)
+            button.disabled = !!busy;
     });
+}
+function loadIdentityChip() {
+    var panel = document.getElementById('accountPanel');
+    if (panel)
+        panel.innerHTML = '<div class="account-loading">Loading account…</div>';
+    return fetch('/api/account?t=' + Date.now()).then(function (res) {
+        return res.json().then(function (data) {
+            if (!res.ok)
+                throw new Error(data.error || ('Account request failed (' + res.status + ')'));
+            currentAccount = data;
+            renderAccountChip(data, null);
+            renderAccountPanel(data, null);
+            return data;
+        });
+    }).catch(function (error) {
+        currentAccount = null;
+        renderAccountChip(null, error.message || 'Unable to load account');
+        renderAccountPanel(null, error.message || 'Unable to load account');
+        return null;
+    });
+}
+function startAccountSignIn() {
+    var url = currentAccount && currentAccount.auth_url ? currentAccount.auth_url : 'https://synalux.ai/auth?source=prism';
+    window.open(url, '_blank', 'noopener,noreferrer');
+    setAccountStatus('Finish sign-in in Synalux, then paste the one-time code here.');
+}
+function openAccountBilling() {
+    var target = window.open('about:blank', '_blank');
+    setAccountBusy(true);
+    setAccountStatus('Opening secure billing…');
+    return fetch('/api/account/billing', { method: 'POST' }).then(function (res) {
+        return res.json().then(function (data) {
+            if (!res.ok)
+                throw new Error(data.error || ('Billing request failed (' + res.status + ')'));
+            if (!data.url)
+                throw new Error('Billing link unavailable');
+            if (target)
+                target.location.href = data.url;
+            else
+                window.location.href = data.url;
+            setAccountStatus('Billing opened in a new tab.', 'success');
+        });
+    }).catch(function (error) {
+        if (target)
+            target.close();
+        setAccountStatus(error.message || 'Billing unavailable', 'error');
+    }).then(function () { setAccountBusy(false); });
+}
+function connectAccount() {
+    var input = document.getElementById('accountCodeInput');
+    var code = input ? input.value.trim() : '';
+    if (!code) {
+        setAccountStatus('Paste the one-time code from Synalux.', 'error');
+        return;
+    }
+    setAccountBusy(true);
+    setAccountStatus('Connecting account…');
+    return fetch('/api/account/connect', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code: code })
+    }).then(function (res) {
+        return res.json().then(function (data) {
+            if (!res.ok)
+                throw new Error(data.error || ('Sign-in failed (' + res.status + ')'));
+            currentAccount = data;
+            renderAccountChip(data, null);
+            renderAccountPanel(data, null);
+            setAccountStatus('Account connected.', 'success');
+        });
+    }).catch(function (error) {
+        setAccountStatus(error.message || 'Sign-in failed', 'error');
+    }).then(function () { setAccountBusy(false); });
+}
+function signOutAccount() {
+    setAccountBusy(true);
+    setAccountStatus('Signing out…');
+    return fetch('/api/account/signout', { method: 'POST' }).then(function (res) {
+        return res.json().then(function (data) {
+            if (!res.ok && !data.signed_out)
+                throw new Error(data.error || ('Sign-out failed (' + res.status + ')'));
+            return loadIdentityChip().then(function () {
+                setAccountStatus(data.warning || 'Signed out.', data.warning ? 'error' : 'success');
+            });
+        });
+    }).catch(function (error) {
+        setAccountStatus(error.message || 'Sign-out failed', 'error');
+    }).then(function () { setAccountBusy(false); });
 }
 // Auto-load project list on page load
 (function () {
@@ -3377,6 +3589,7 @@ loadGraph();
 // ─── Settings Modal (v3.0) ───
 function openSettings() {
     document.getElementById('settingsModal').classList.add('active');
+    loadIdentityChip();
     loadSettings();
 }
 function closeSettings() {
@@ -3390,10 +3603,13 @@ document.getElementById('settingsModal').addEventListener('click', function (e) 
 // ─── Skills Tab JS ───────────────────────────────────────────
 var _skillsCache = {}; // role → content cache
 function switchSettingsTab(tab) {
-    ['settings', 'skills', 'providers', 'observability'].forEach(function (t) {
+    ['account', 'settings', 'skills', 'providers', 'observability'].forEach(function (t) {
         document.getElementById('stab-' + t).classList.toggle('active', t === tab);
         document.getElementById('spanel-' + t).classList.toggle('active', t === tab);
     });
+    if (tab === 'account') {
+        loadIdentityChip();
+    }
     if (tab === 'skills') {
         var role = document.getElementById('skillRoleSelect').value;
         loadSkillForRole(role);

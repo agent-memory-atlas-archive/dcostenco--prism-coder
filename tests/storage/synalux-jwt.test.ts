@@ -195,6 +195,43 @@ describe("SynaluxStorage — JWT exchange + caching", () => {
       .rejects.toThrow(/JWT exchange failed.*Invalid or revoked/);
   });
 
+  it("does not refresh or call Portal after the shared account state is signed out", async () => {
+    const s = new SynaluxStorage();
+    const { setSynaluxSignedOut } = await import("../../src/utils/synaluxCredentialState.js");
+    setSynaluxSignedOut(true);
+    try {
+      await expect(s.saveLedger({ project: "demo", conversation_id: "c1", summary: "blocked", user_id: "u", todos: [], files_changed: [], decisions: [], keywords: [] }))
+        .rejects.toThrow(/signed out/);
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      setSynaluxSignedOut(false);
+    }
+  });
+
+  it("makes a captured storage reference unusable when the singleton closes it", async () => {
+    const s = new SynaluxStorage();
+    await s.close();
+    await expect(s.saveLedger({ project: "demo", conversation_id: "c1", summary: "blocked", user_id: "u", todos: [], files_changed: [], decisions: [], keywords: [] }))
+      .rejects.toThrow(/signed out/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects a successful Portal response that arrives after close", async () => {
+    let resolveWrite!: (response: Response) => void;
+    const deferredWrite = new Promise<Response>((resolve) => { resolveWrite = resolve; });
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse(200, { status: "success", jwt: "jwt-1", expires_in: 900 }))
+      .mockReturnValueOnce(deferredWrite);
+    const s = new SynaluxStorage();
+
+    const write = s.saveLedger({ project: "demo", conversation_id: "c1", summary: "late", user_id: "u", todos: [], files_changed: [], decisions: [], keywords: [] });
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    await s.close();
+    resolveWrite(jsonResponse(200, { status: "success", entry: { id: "written-after-close" } }));
+
+    await expect(write).rejects.toThrow(/signed out/);
+  });
+
   it("dedupes concurrent JWT exchanges (rate-limit safe)", async () => {
     let exchangeResolve: ((res: Response) => void) | null = null;
     const exchangePromise = new Promise<Response>((resolve) => { exchangeResolve = resolve; });

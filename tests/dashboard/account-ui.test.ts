@@ -1,0 +1,158 @@
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { JSDOM, VirtualConsole } from "jsdom";
+import { renderDashboardHTML } from "../../src/dashboard/ui.js";
+
+const pages: JSDOM[] = [];
+
+afterEach(() => {
+  pages.splice(0).forEach(page => page.window.close());
+  vi.restoreAllMocks();
+});
+
+type AccountFixture = {
+  signed_in: boolean;
+  configured: boolean;
+  name: string | null;
+  role_key: string | null;
+  plan: string;
+  plan_source?: string;
+  billing: { action: string; url: string | null };
+  auth_url: string;
+};
+
+function fixture(plan = "free", overrides: Partial<AccountFixture> = {}): AccountFixture {
+  return {
+    signed_in: true,
+    configured: true,
+    name: "Dmitri Costenco",
+    role_key: "BCBA",
+    plan,
+    plan_source: "stripe",
+    billing: { action: plan === "free" ? "upgrade" : "manage", url: plan === "free" ? "https://synalux.ai/pricing" : null },
+    auth_url: "https://synalux.ai/auth?source=prism",
+    ...overrides,
+  };
+}
+
+async function openDashboard(account: AccountFixture | { error: string }, accountStatus = 200) {
+  const page = new JSDOM(renderDashboardHTML("test"), {
+    runScripts: "outside-only",
+    url: "http://127.0.0.1:34119/",
+    virtualConsole: new VirtualConsole(),
+  });
+  pages.push(page);
+  const calls: Array<{ path: string; init?: RequestInit }> = [];
+  const popup = { location: { href: "about:blank" }, close: vi.fn() };
+  page.window.open = vi.fn(() => popup as unknown as Window);
+  page.window.vis = { Network: class { on() {} } } as never;
+  page.window.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const path = String(input);
+    calls.push({ path, init });
+    if (path.startsWith("/api/account/connect") && init?.method === "POST") {
+      return new Response(JSON.stringify(fixture("standard")), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    if (path.startsWith("/api/account/billing") && init?.method === "POST") {
+      return new Response(JSON.stringify({ url: "https://billing.stripe.com/p/session", action: "manage" }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    if (path.startsWith("/api/account/signout") && init?.method === "POST") {
+      return new Response(JSON.stringify({ signed_out: true, revoked: true }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    if (path.startsWith("/api/account")) {
+      return new Response(JSON.stringify(account), { status: accountStatus, headers: { "content-type": "application/json" } });
+    }
+    if (path.startsWith("/api/projects")) return new Response(JSON.stringify({ projects: [] }), { status: 200 });
+    if (path.startsWith("/api/settings")) return new Response(JSON.stringify({ settings: {} }), { status: 200 });
+    if (path.startsWith("/api/graph")) return new Response(JSON.stringify({ nodes: [], edges: [] }), { status: 200 });
+    return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+  }) as typeof page.window.fetch;
+
+  for (const script of page.window.document.querySelectorAll("script:not([src])")) {
+    page.window.eval(script.textContent || "");
+  }
+  await vi.waitFor(() => expect(page.window.document.getElementById("identityChip")?.style.display).toBe("flex"));
+  return { page, doc: page.window.document, calls, popup };
+}
+
+describe("dashboard Account & Subscription UX", () => {
+  it("makes Account the first settings view while preserving every specialist view", async () => {
+    const { page, doc } = await openDashboard(fixture("free"));
+    expect(doc.getElementById("stab-account")?.classList.contains("active")).toBe(true);
+    expect(doc.getElementById("spanel-account")?.classList.contains("active")).toBe(true);
+    expect(["settings", "skills", "providers", "observability"].every(tab => Boolean(doc.getElementById(`stab-${tab}`)))).toBe(true);
+    expect(["project", "search", "factory", "vm", "marketplace", "compliance"].every(tab => Boolean(doc.getElementById(`mtab-${tab}`)))).toBe(true);
+    expect(page.window.getComputedStyle(doc.querySelector(".main-tabs") as Element).overflowX).toBe("auto");
+  });
+
+  it("shows a discoverable signed-out Free state with Sign in, View plans, and code completion", async () => {
+    const { doc } = await openDashboard(fixture("free", {
+      signed_in: false,
+      configured: false,
+      name: null,
+      role_key: null,
+    }));
+    expect(doc.getElementById("identityChip")?.textContent).toContain("Free");
+    expect(doc.getElementById("accountPanel")?.textContent).toContain("Prism Free");
+    expect(doc.getElementById("accountPanel")?.textContent).toContain("Sign in");
+    expect(doc.getElementById("accountPanel")?.textContent).toContain("View plans");
+    expect(doc.getElementById("accountCodeInput")).not.toBeNull();
+  });
+
+  it("shows the authenticated user, role, Free plan, upgrade action, and sign out", async () => {
+    const { doc } = await openDashboard(fixture("free"));
+    expect(doc.getElementById("identityChip")?.textContent).toContain("Dmitri Costenco");
+    expect(doc.getElementById("identityChip")?.textContent).toContain("Free");
+    const accountText = doc.getElementById("accountPanel")?.textContent || "";
+    expect(accountText).toContain("Dmitri Costenco");
+    expect(accountText).toContain("BCBA");
+    expect(accountText).toContain("Upgrade plan");
+    expect(accountText).toContain("Sign out");
+  });
+
+  it.each(["standard", "advanced", "enterprise"])("renders the authenticated %s plan and subscription management", async plan => {
+    const { doc } = await openDashboard(fixture(plan));
+    const text = doc.getElementById("accountPanel")?.textContent || "";
+    expect(text).toContain(plan[0].toUpperCase() + plan.slice(1));
+    expect(text).toContain("Dmitri Costenco");
+    expect(text).toContain("Manage subscription");
+    expect(doc.querySelector(`.plan-step.current strong`)?.textContent?.toLowerCase()).toBe(plan);
+  });
+
+  it("distinguishes a managed paid plan from Stripe self-service", async () => {
+    const { doc } = await openDashboard(fixture("enterprise", {
+      plan_source: "managed",
+      billing: { action: "included", url: "https://synalux.ai/pricing" },
+    }));
+    const text = doc.getElementById("accountPanel")?.textContent || "";
+    expect(text).toContain("Managed");
+    expect(text).toContain("View plans");
+    expect(text).not.toContain("Manage subscription");
+  });
+
+  it("shows an account error instead of falsely presenting a configured user as Free", async () => {
+    const { doc } = await openDashboard({ error: "Unable to verify current subscription" }, 502);
+    expect(doc.getElementById("identityChip")?.textContent).toContain("Account");
+    const text = doc.getElementById("accountPanel")?.textContent || "";
+    expect(text).toContain("Account temporarily unavailable");
+    expect(text).toContain("Unable to verify current subscription");
+    expect(text).not.toContain("Prism Free");
+  });
+
+  it("connects the pasted one-time code without exposing a credential in the DOM", async () => {
+    const { page, doc, calls } = await openDashboard(fixture("free", {
+      signed_in: false, configured: false, name: null, role_key: null,
+    }));
+    const input = doc.getElementById("accountCodeInput") as HTMLInputElement;
+    input.value = "synalux_code_fixture";
+    await (page.window as unknown as { connectAccount: () => Promise<void> }).connectAccount();
+    expect(calls.some(call => call.path === "/api/account/connect" && JSON.parse(String(call.init?.body)).code === "synalux_code_fixture")).toBe(true);
+    expect(doc.getElementById("accountPanel")?.textContent).toContain("Standard");
+    expect(doc.documentElement.innerHTML).not.toContain("synalux_sk_");
+  });
+
+  it("opens the server-validated Stripe Billing Portal URL", async () => {
+    const { page, popup, calls } = await openDashboard(fixture("standard"));
+    await (page.window as unknown as { openAccountBilling: () => Promise<void> }).openAccountBilling();
+    expect(calls.some(call => call.path === "/api/account/billing" && call.init?.method === "POST")).toBe(true);
+    expect(popup.location.href).toBe("https://billing.stripe.com/p/session");
+  });
+});
