@@ -20,6 +20,7 @@
  * subscription key at load, no Brave key anywhere.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { _resetSynaluxCredentialStateForTest, setSynaluxSignedOut } from "../src/utils/synaluxCredentialState.js";
 
 vi.mock("../src/config.js", () => ({
   // What `prism connect` actually wrote into the host env block, as config.ts
@@ -59,6 +60,7 @@ let savedEnv: Record<string, string | undefined> = {};
 
 beforeEach(() => {
   vi.clearAllMocks();
+  _resetSynaluxCredentialStateForTest();
   // Hermetic: this machine really does carry these in its shell.
   savedEnv = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
   for (const k of ENV_KEYS) delete process.env[k];
@@ -67,6 +69,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  _resetSynaluxCredentialStateForTest();
   for (const [k, v] of Object.entries(savedEnv)) {
     if (v === undefined) delete process.env[k];
     else process.env[k] = v;
@@ -157,6 +160,19 @@ describe("portal search availability follows the live credentials", () => {
       "https://enterprise.portal.example/api/v1/prism/search",
     );
   });
+
+  it("does not send a request when sign-out wins an in-flight JWT exchange", async () => {
+    process.env.PRISM_SYNALUX_API_KEY = "test_subscription_live";
+    let resolveJwt!: (jwt: string) => void;
+    mockGetJwt.mockReturnValueOnce(new Promise<string>((resolve) => { resolveJwt = resolve; }));
+
+    const search = synaluxSearch.synaluxWebSearchRaw("query", 5);
+    setSynaluxSignedOut(true);
+    resolveJwt("jwt-after-signout");
+
+    await expect(search).rejects.toThrow(/signed out/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
 });
 
 describe("hydrateSynaluxCredentials", () => {
@@ -209,6 +225,18 @@ describe("hydrateSynaluxCredentials", () => {
         throw new Error("settings db locked");
       }),
     ).resolves.toBe(false);
+  });
+
+  it("honors a persisted sign-out even when the host environment still has the old key", async () => {
+    process.env.PRISM_SYNALUX_API_KEY = "test_subscription_stale_host_key";
+    const ready = await synaluxSearch.hydrateSynaluxCredentials(
+      async (name) => name === "PRISM_SYNALUX_SIGNED_OUT" ? "true" : "",
+    );
+
+    expect(ready).toBe(false);
+    expect(process.env.PRISM_SYNALUX_API_KEY).toBeUndefined();
+    expect(synaluxSearch.usablePortalKey()).toBeUndefined();
+    expect(synaluxSearch.synaluxSearchAvailable()).toBe(false);
   });
 });
 

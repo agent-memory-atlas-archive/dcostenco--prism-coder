@@ -20,6 +20,7 @@
 
 import { debugLog } from "./logger.js";
 import { PRISM_SYNALUX_BASE_URL, PRISM_SYNALUX_API_KEY } from "../config.js";
+import { isSynaluxSignedOut } from "./synaluxCredentialState.js";
 
 interface ExchangeResponse {
     status?: string;
@@ -42,6 +43,7 @@ interface CacheEntry {
 
 let cache: CacheEntry | null = null;
 let inFlight: Promise<string | null> | null = null;
+let generation = 0;
 
 /**
  * Returns a usable JWT, exchanging from the sk_ token if needed.
@@ -50,6 +52,7 @@ let inFlight: Promise<string | null> | null = null;
  * Concurrent callers share a single in-flight exchange (no thundering herd).
  */
 export async function getSynaluxJwt(): Promise<string | null> {
+    if (isSynaluxSignedOut()) return null;
     // Re-read process.env because storage/dashboard configuration can inject
     // credentials after config.ts captured its module-load constants.
     const baseUrl = process.env.PRISM_SYNALUX_BASE_URL?.trim() ||
@@ -66,7 +69,9 @@ export async function getSynaluxJwt(): Promise<string | null> {
 
     if (inFlight) return inFlight;
 
-    inFlight = (async () => {
+    const requestGeneration = generation;
+    let exchange!: Promise<string | null>;
+    exchange = (async () => {
         try {
             const url = `${baseUrl}/api/v1/auth/jwt`;
             const res = await fetch(url, {
@@ -92,6 +97,13 @@ export async function getSynaluxJwt(): Promise<string | null> {
                 return null;
             }
 
+            // Sign-out/invalidation may happen while the network request is in
+            // flight. Never publish or return a credential from the old
+            // generation after that boundary has moved.
+            if (isSynaluxSignedOut() || generation !== requestGeneration) {
+                return null;
+            }
+
             const ttlMs = Math.max(MIN_CACHE_MS, (data.expires_in ?? 900) * 1000);
             cache = { jwt: data.jwt, expiresAt: Date.now() + ttlMs };
             debugLog(`[synaluxJwt] exchanged ok, ttl=${ttlMs}ms`);
@@ -101,20 +113,26 @@ export async function getSynaluxJwt(): Promise<string | null> {
             cache = null;
             return null;
         } finally {
-            inFlight = null;
+            if (inFlight === exchange) inFlight = null;
         }
     })();
+    inFlight = exchange;
 
-    return inFlight;
+    return exchange;
 }
 
 /** Force the next getSynaluxJwt() to re-exchange. Call on 401. */
 export function invalidateSynaluxJwt(): void {
+    generation += 1;
     cache = null;
+    // The old request cannot be cancelled portably, but it is generation-bound
+    // above. Detach it so a new sign-in can exchange immediately.
+    inFlight = null;
 }
 
 /** Test-only: clear all state. */
 export function _resetSynaluxJwtForTest(): void {
+    generation += 1;
     cache = null;
     inFlight = null;
 }

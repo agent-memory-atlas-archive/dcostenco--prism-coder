@@ -35,6 +35,7 @@ import { getEmbeddingProvider } from "../utils/llm/factory.js";
 import { buildVaultDirectory } from "../utils/vaultExporter.js";
 import { redactSettings } from "../tools/commonHelpers.js";
 import { handleGraphRoutes } from "./graphRouter.js";
+import { handleAccountRoutes } from "./accountRouter.js";
 import { isDashboardSettingKeyAllowed, isDashboardSettingValueAllowed } from "./settingsPolicy.js";
 import { isTrustedRequest, isRebindGuardedPath } from "./hostGuard.js";
 import {
@@ -694,6 +695,11 @@ return false;}
         await setSetting(`user_skill:${role}`, "");
         res.writeHead(200, { "Content-Type": "application/json" });
         return res.end(JSON.stringify({ ok: true, role, namespace: "user_skill" }));
+      }
+
+      // ─── API: Synalux Account & Subscription ───
+      if (url.pathname.startsWith("/api/account")) {
+        if (await handleAccountRoutes(url, req, res)) return;
       }
 
       // ─── API: Knowledge Graph (v6.2 — extracted to graphRouter.ts) ───

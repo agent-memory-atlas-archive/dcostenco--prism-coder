@@ -9,6 +9,7 @@ import { SupabaseStorage } from "./supabase.js";
 import type { StorageBackend } from "./interface.js";
 import { getSetting } from "./configStorage.js";
 import { upgradeInsecureCloudUrl } from "../utils/secureUrl.js";
+import { setSynaluxSignedOut } from "../utils/synaluxCredentialState.js";
 
 export function isValidHttpUrl(url: string): boolean {
   try {
@@ -55,6 +56,12 @@ export { upgradeInsecureCloudUrl } from "../utils/secureUrl.js";
  * Returns true if usable credentials are now in process.env.
  */
 export async function ensureSynaluxCredentials(): Promise<boolean> {
+  const signedOut = (await getSetting("PRISM_SYNALUX_SIGNED_OUT", "")) === "true";
+  setSynaluxSignedOut(signedOut);
+  if (signedOut) {
+    delete process.env.PRISM_SYNALUX_API_KEY;
+    return false;
+  }
   if (SYNALUX_CONFIGURED) return true;
   // Re-check process.env directly: SYNALUX_CONFIGURED is captured at module
   // load, so credentials injected later by another caller would be invisible

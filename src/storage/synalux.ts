@@ -51,6 +51,7 @@
 import { SupabaseStorage } from "./supabase.js";
 import { debugLog } from "../utils/logger.js";
 import { PRISM_SYNALUX_BASE_URL, PRISM_SYNALUX_API_KEY } from "../config.js";
+import { isSynaluxSignedOut } from "../utils/synaluxCredentialState.js";
 import { KnowledgeSearchRequestSchema, KnowledgeSearchResponseSchema } from "./portalContracts.js";
 import type {
   LedgerEntry,
@@ -110,6 +111,8 @@ export class SynaluxStorage extends SupabaseStorage {
   private cachedJwtExpiresAt = 0;
   private inflightExchange: Promise<string> | null = null;
   private readonly inflightContextLoads = new Map<string, Promise<ContextResult>>();
+  private readonly closeController = new AbortController();
+  private closed = false;
 
   constructor() {
     super();
@@ -136,7 +139,21 @@ export class SynaluxStorage extends SupabaseStorage {
   }
 
   async close(): Promise<void> {
-    debugLog("[SynaluxStorage] Closed (no-op for HTTP)");
+    this.closed = true;
+    this.cachedJwt = null;
+    this.cachedJwtExpiresAt = 0;
+    this.closeController.abort();
+    debugLog("[SynaluxStorage] Closed");
+  }
+
+  private assertUsable(): void {
+    if (this.closed || isSynaluxSignedOut()) {
+      throw new Error("[SynaluxStorage] Synalux account is signed out");
+    }
+  }
+
+  private requestSignal(timeoutMs: number): AbortSignal {
+    return AbortSignal.any([this.closeController.signal, AbortSignal.timeout(timeoutMs)]);
   }
 
   /**
@@ -145,6 +162,7 @@ export class SynaluxStorage extends SupabaseStorage {
    * inflight exchange so we don't trip the portal's 5s rate limit.
    */
   private async ensureJwt(): Promise<string> {
+    this.assertUsable();
     const now = Date.now();
     if (this.cachedJwt && now < this.cachedJwtExpiresAt - JWT_REFRESH_LEEWAY_MS) {
       return this.cachedJwt;
@@ -154,6 +172,7 @@ export class SynaluxStorage extends SupabaseStorage {
     }
 
     this.inflightExchange = (async () => {
+      this.assertUsable();
       const url = `${this.baseUrl}/api/v1/auth/jwt`;
       let res: Response;
       try {
@@ -163,7 +182,7 @@ export class SynaluxStorage extends SupabaseStorage {
             "Authorization": `Bearer ${this.refreshToken}`,
             "X-Prism-Client": "prism-mcp-thin-client",
           },
-          signal: AbortSignal.timeout(10_000),
+          signal: this.requestSignal(10_000),
         });
       } catch (err) {
         throw new Error(
@@ -184,6 +203,7 @@ export class SynaluxStorage extends SupabaseStorage {
         );
       }
 
+      this.assertUsable();
       this.cachedJwt = data.jwt;
       this.cachedJwtExpiresAt = Date.now() + (data.expires_in ?? 900) * 1000;
       debugLog(`[SynaluxStorage] JWT refreshed (expires in ${data.expires_in ?? 900}s)`);
@@ -206,6 +226,7 @@ export class SynaluxStorage extends SupabaseStorage {
   private async portalPost(path: string, body: Record<string, unknown>): Promise<PortalResponse> {
     const url = `${this.baseUrl}${path}`;
     const send = async (jwt: string): Promise<Response> => {
+      this.assertUsable();
       try {
         return await fetch(url, {
           method: "POST",
@@ -215,7 +236,7 @@ export class SynaluxStorage extends SupabaseStorage {
             "X-Prism-Client": "prism-mcp-thin-client",
           },
           body: JSON.stringify(body),
-          signal: AbortSignal.timeout(30_000),
+          signal: this.requestSignal(30_000),
         });
       } catch (err) {
         throw new Error(
@@ -226,12 +247,14 @@ export class SynaluxStorage extends SupabaseStorage {
 
     let jwt = await this.ensureJwt();
     let res = await send(jwt);
+    this.assertUsable();
 
     if (res.status === 401) {
       this.cachedJwt = null;
       this.cachedJwtExpiresAt = 0;
       jwt = await this.ensureJwt();
       res = await send(jwt);
+      this.assertUsable();
     }
 
     let data: PortalResponse;
@@ -242,6 +265,7 @@ export class SynaluxStorage extends SupabaseStorage {
         `[SynaluxStorage] Invalid JSON from ${url} (status ${res.status})`
       );
     }
+    this.assertUsable();
 
     if (!res.ok || data.status === "error") {
       const msg = data?.error || `HTTP ${res.status}`;
@@ -255,13 +279,14 @@ export class SynaluxStorage extends SupabaseStorage {
   private async portalGet(path: string): Promise<Record<string, unknown>> {
     const url = `${this.baseUrl}${path}`;
     const send = async (jwt: string): Promise<Response> => {
+      this.assertUsable();
       try {
         return await fetch(url, {
           headers: {
             "Authorization": `Bearer ${jwt}`,
             "X-Prism-Client": "prism-mcp-thin-client",
           },
-          signal: AbortSignal.timeout(30_000),
+          signal: this.requestSignal(30_000),
           redirect: "error",
         });
       } catch (err) {
@@ -273,11 +298,13 @@ export class SynaluxStorage extends SupabaseStorage {
 
     let jwt = await this.ensureJwt();
     let res = await send(jwt);
+    this.assertUsable();
     if (res.status === 401) {
       this.cachedJwt = null;
       this.cachedJwtExpiresAt = 0;
       jwt = await this.ensureJwt();
       res = await send(jwt);
+      this.assertUsable();
     }
     let data: Record<string, unknown>;
     try {
@@ -285,6 +312,7 @@ export class SynaluxStorage extends SupabaseStorage {
     } catch {
       throw new Error(`[SynaluxStorage] Invalid JSON from ${url} (status ${res.status})`);
     }
+    this.assertUsable();
     if (!res.ok || data.status === "error") {
       throw new Error(`[SynaluxStorage] ${path} failed: ${data.error || `HTTP ${res.status}`}`);
     }
