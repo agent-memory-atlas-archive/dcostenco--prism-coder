@@ -239,7 +239,12 @@ export function renderDashboardHTML(version: string): string {
     }
 
     /* ─── State Panel ─── */
-    .summary-text { color: var(--text-secondary); font-size: 0.9rem; line-height: 1.7; margin-bottom: 1rem; }
+    .summary-text { color: var(--text-secondary); font-size: 0.9rem; line-height: 1.7; margin-bottom: 0.4rem; }
+    .state-source, .timeline-note {
+      color: var(--text-muted); font-size: 0.72rem; line-height: 1.5;
+    }
+    .state-source { margin-bottom: 1rem; }
+    .timeline-note { margin: -0.25rem 0 0.8rem; }
     .todo-list { list-style: none; padding: 0; }
     .todo-list li {
       padding: 0.5rem 0; border-bottom: 1px solid rgba(255,255,255,0.05);
@@ -828,10 +833,11 @@ export function renderDashboardHTML(version: string): string {
     <div id="content" class="grid grid-main fade-in">
       <!-- Left Column -->
       <div class="grid" style="align-content: start;">
-        <!-- Current State -->
+        <!-- Latest Activity -->
         <div class="card">
-          <div class="card-title"><span class="dot" style="background:var(--accent-blue)"></span> Current State <span id="versionBadge" class="badge badge-purple" style="margin-left:auto"></span></div>
+          <div class="card-title"><span class="dot" style="background:var(--accent-blue)"></span> Latest Activity <span id="versionBadge" class="badge badge-purple" style="margin-left:auto"></span></div>
           <div class="summary-text" id="summary"></div>
+          <div class="state-source" id="currentStateSource"></div>
           <div class="card-title" style="margin-top:0.5rem"><span class="dot" style="background:var(--accent-cyan)"></span> Pending TODOs</div>
           <ul class="todo-list" id="todos"></ul>
         </div>
@@ -1073,16 +1079,18 @@ export function renderDashboardHTML(version: string): string {
           </div>
         </div>
 
-        <!-- Time Travel -->
+        <!-- Recent Sessions -->
         <div class="card">
-          <div class="card-title"><span class="dot" style="background:var(--accent-purple)"></span> Time Travel History 🕰️</div>
-          <div class="timeline" id="historyTimeline"></div>
+          <div class="card-title"><span class="dot" style="background:var(--accent-amber)"></span> Recent Sessions</div>
+          <div class="timeline-note">Durable session activity, newest first.</div>
+          <div class="timeline" id="ledgerTimeline"></div>
         </div>
 
-        <!-- Ledger -->
+        <!-- Saved Handoff Versions -->
         <div class="card">
-          <div class="card-title"><span class="dot" style="background:var(--accent-amber)"></span> Session Ledger</div>
-          <div class="timeline" id="ledgerTimeline"></div>
+          <div class="card-title"><span class="dot" style="background:var(--accent-purple)"></span> Saved Handoff Versions 🕰️</div>
+          <div class="timeline-note">Restore points created when an agent saves a handoff.</div>
+          <div class="timeline" id="historyTimeline"></div>
         </div>
         </div>
 
@@ -2368,7 +2376,7 @@ function signOutAccount() {
 })();
 function loadProject() {
     return __awaiter(this, void 0, void 0, function () {
-        var project, res, data, ctx, todos, todoList, meta, briefingCard, visualCard, visuals, historyEl, ledgerEl, healthRes, healthData, healthCard, healthDot, healthLabel, healthSummary, healthIssues, statusMap, t, issues, cleanupBtn, sevIcons, he_1, e_3;
+        var project, res, data, ctx, ledgerEntries, latestLedger, contextTime, latestLedgerTime, useLatestLedger, versionBadge, currentStateSource, currentSummary, todos, todoList, meta, briefingCard, visualCard, visuals, historyEl, ledgerEl, healthRes, healthData, healthCard, healthDot, healthLabel, healthSummary, healthIssues, statusMap, t, issues, cleanupBtn, sevIcons, he_1, e_3;
         return __generator(this, function (_a) {
             switch (_a.label) {
                 case 0:
@@ -2397,9 +2405,41 @@ function loadProject() {
                 case 3:
                     data = _a.sent();
                     ctx = data.context || {};
-                    document.getElementById('versionBadge').textContent = 'v' + (ctx.version || '?');
-                    document.getElementById('summary').textContent = ctx.last_summary || ctx.summary || 'No summary available.';
-                    todos = ctx.pending_todo || ctx.active_context || [];
+                    ledgerEntries = Array.isArray(data.ledger) ? data.ledger.slice() : [];
+                    ledgerEntries.sort(function (a, b) {
+                        var aTime = Date.parse(a && a.created_at ? a.created_at : '');
+                        var bTime = Date.parse(b && b.created_at ? b.created_at : '');
+                        if (!Number.isFinite(aTime)) aTime = 0;
+                        if (!Number.isFinite(bTime)) bTime = 0;
+                        return bTime - aTime;
+                    });
+                    latestLedger = ledgerEntries.length > 0 ? ledgerEntries[0] : null;
+                    contextTime = Date.parse(ctx.updated_at || '');
+                    latestLedgerTime = Date.parse(latestLedger && latestLedger.created_at ? latestLedger.created_at : '');
+                    useLatestLedger = !!latestLedger && !!(latestLedger.summary || latestLedger.content) &&
+                        ((!Number.isFinite(contextTime) && Number.isFinite(latestLedgerTime)) ||
+                            (Number.isFinite(latestLedgerTime) && latestLedgerTime > contextTime) ||
+                            !(ctx.last_summary || ctx.summary));
+                    versionBadge = document.getElementById('versionBadge');
+                    versionBadge.textContent = useLatestLedger ? 'latest' : 'v' + (ctx.version || '?');
+                    versionBadge.className = 'badge ' + (useLatestLedger ? 'badge-amber' : 'badge-purple');
+                    currentSummary = useLatestLedger
+                        ? (latestLedger.summary || latestLedger.content)
+                        : (ctx.last_summary || ctx.summary);
+                    document.getElementById('summary').textContent = currentSummary || 'No summary available.';
+                    currentStateSource = document.getElementById('currentStateSource');
+                    if (useLatestLedger) {
+                        currentStateSource.textContent = 'Latest session' +
+                            (latestLedger.created_at ? ' · ' + formatDate(latestLedger.created_at) : '') +
+                            (ctx.version ? ' · saved handoff v' + ctx.version + ' remains available below' : '');
+                    }
+                    else {
+                        currentStateSource.textContent = 'Saved handoff' +
+                            (ctx.updated_at ? ' · ' + formatDate(ctx.updated_at) : '');
+                    }
+                    todos = useLatestLedger && Array.isArray(latestLedger.todos)
+                        ? latestLedger.todos
+                        : (ctx.pending_todo || ctx.active_context || []);
                     todoList = document.getElementById('todos');
                     if (Array.isArray(todos) && todos.length > 0) {
                         todoList.innerHTML = todos.map(function (t) { return '<li>' + escapeHtml(t) + '</li>'; }).join('');
@@ -2448,8 +2488,8 @@ function loadProject() {
                         historyEl.innerHTML = '<div style="color:var(--text-muted);font-size:0.85rem;padding:1rem;text-align:center">No time travel history yet.</div>';
                     }
                     ledgerEl = document.getElementById('ledgerTimeline');
-                    if (data.ledger && data.ledger.length > 0) {
-                        ledgerEl.innerHTML = data.ledger.map(function (l) {
+                    if (ledgerEntries.length > 0) {
+                        ledgerEl.innerHTML = ledgerEntries.map(function (l) {
                             var summary = l.summary || l.content || 'Entry';
                             var decisions = l.decisions;
                             var extra = '';

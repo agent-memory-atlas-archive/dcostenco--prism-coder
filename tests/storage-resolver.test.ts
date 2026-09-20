@@ -153,6 +153,47 @@ describe("getStorage — synalux dashboard-config fallback", () => {
     expect(mockGetEntitlements).not.toHaveBeenCalled();
   });
 
+  it("uses local storage after deliberate sign-out even when synalux is explicitly configured", async () => {
+    process.env.PRISM_STORAGE = "synalux";
+    mockSettings.PRISM_SYNALUX_BASE_URL = "https://portal.synalux.example";
+    mockSettings.PRISM_SYNALUX_API_KEY = "stored-token-must-not-be-used";
+    mockSettings.PRISM_SYNALUX_SIGNED_OUT = "true";
+
+    const storage = await freshGetStorage();
+
+    expect((storage as { tag?: string }).tag).toBe("sqlite");
+    expect(process.env.PRISM_SYNALUX_API_KEY).toBeUndefined();
+    expect(sqliteInstances).toHaveLength(1);
+    expect(synaluxInstances).toHaveLength(0);
+    expect(mockGetEntitlements).not.toHaveBeenCalled();
+  });
+
+  it("switches the dashboard accessor from synalux to local after sign-out", async () => {
+    process.env.PRISM_STORAGE = "synalux";
+    process.env.PRISM_SYNALUX_BASE_URL = "https://portal.synalux.example";
+    process.env.PRISM_SYNALUX_API_KEY = "test-api-key";
+    mockSettings.PRISM_SYNALUX_SIGNED_OUT = "false";
+
+    const storageModule = await import("../src/storage/index.js");
+    const { createDashboardStorageAccessor } = await import("../src/dashboard/storageAccessor.js");
+    const getDashboardStorage = createDashboardStorageAccessor();
+
+    await expect(getDashboardStorage()).resolves.toMatchObject({ tag: "synalux" });
+
+    // This mirrors signOutDashboardAccount: persist the veto, remove the
+    // credential, and close the canonical singleton. The next dashboard API
+    // request must resolve the local Free backend without a process restart.
+    mockSettings.PRISM_SYNALUX_SIGNED_OUT = "true";
+    mockSettings.PRISM_SYNALUX_API_KEY = "";
+    delete process.env.PRISM_SYNALUX_API_KEY;
+    await storageModule.closeStorage();
+
+    await expect(getDashboardStorage()).resolves.toMatchObject({ tag: "sqlite" });
+    expect(synaluxInstances).toHaveLength(1);
+    expect(sqliteInstances).toHaveLength(1);
+    await storageModule.closeStorage();
+  });
+
   it.each([
     ["free", false, "sqlite"],
     ["standard", true, "synalux"],

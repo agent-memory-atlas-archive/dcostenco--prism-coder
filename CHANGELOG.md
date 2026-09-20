@@ -2,6 +2,26 @@
 
 All notable changes to this project will be documented in this file.
 
+## 20.21.10 — 2026-09-20
+
+### Signed-out Free dashboards retain local projects and recent activity
+
+Signing out closed the Synalux storage client, but the dashboard kept a second
+reference to that closed client. Installations whose saved backend was
+explicitly `synalux` then refused to resolve local storage, leaving the Free
+dashboard with an internal server error and no projects until configuration was
+changed by hand.
+
+The dashboard now resolves storage through the canonical backend on every
+request. A deliberate sign-out temporarily selects local SQLite while
+preserving the Synalux preference for the next sign-in; an accidentally missing
+cloud credential still fails closed. Local project, handoff, ledger, and graph
+routes remain available without an account or process restart.
+
+Project View now labels the newest durable session as Latest Activity when it
+is newer than the saved handoff. Recent Sessions are sorted newest first, while
+older handoff snapshots remain available separately as restore points.
+
 ## 20.21.9 — 2026-09-19
 
 ### Prism Free opens locally without account redemption

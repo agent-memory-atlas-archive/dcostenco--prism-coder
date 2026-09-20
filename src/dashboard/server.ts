@@ -24,7 +24,7 @@ import * as fs from "fs";
 
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { createServer, getAllPossibleTools } from "../server.js";
-import { getStorage, activeStorageBackend } from "../storage/index.js";
+import { activeStorageBackend } from "../storage/index.js";
 import { readDashboardLedger } from "./ledgerReader.js";
 import { PRISM_USER_ID, SERVER_CONFIG } from "../config.js";
 import { renderDashboardHTML, renderDashboardLocalOpenHTML } from "./ui.js";
@@ -43,6 +43,7 @@ import { buildVaultDirectory } from "../utils/vaultExporter.js";
 import { redactSettings } from "../tools/commonHelpers.js";
 import { handleGraphRoutes } from "./graphRouter.js";
 import { handleAccountRoutes } from "./accountRouter.js";
+import { createDashboardStorageAccessor } from "./storageAccessor.js";
 import { isDashboardSettingKeyAllowed, isDashboardSettingValueAllowed } from "./settingsPolicy.js";
 import { isTrustedRequest, isRebindGuardedPath } from "./hostGuard.js";
 import {
@@ -89,18 +90,10 @@ export async function startDashboardServer(): Promise<void> {
   // Port 3000 conflicts are gracefully handled by server.ts catching EADDRINUSE
   // which will just disable the dashboard on secondary instances, keeping MCP alive.
 
-  // Lazy storage accessor — returns null if storage isn't ready yet.
-  // API routes gracefully degrade with 503 instead of blocking startup.
-  let _storage: Awaited<ReturnType<typeof getStorage>> | null = null;
-  const getStorageSafe = async (): Promise<Awaited<ReturnType<typeof getStorage>> | null> => {
-    if (_storage) return _storage;
-    try {
-      _storage = await getStorage();
-      return _storage;
-    } catch {
-      return null;
-    }
-  };
+  // Resolve through the canonical singleton on each request. Account
+  // connect/sign-out closes that singleton so the next request switches to the
+  // newly selected cloud or local backend without restarting the MCP host.
+  const getStorageSafe = createDashboardStorageAccessor();
 
   /**
    * v5.1: Optional HTTP Basic Auth for remote dashboard access.
