@@ -26,7 +26,7 @@
  * ═══════════════════════════════════════════════════════════════════
  */
 
-import { describe, it, expect, beforeEach, afterAll, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import * as http from "http";
 import { SignJWT, exportJWK, generateKeyPair } from "jose";
 import {
@@ -628,18 +628,16 @@ function httpRequest(
 
 // ─── Integration test suite ──────────────────────────────────────
 
-describe("HTTP Auth Integration", () => {
+describe.sequential("HTTP Auth Integration", () => {
   let testServer: ReturnType<typeof createAuthTestServer>;
   let port: number;
 
   beforeEach(async () => {
-    // Fresh server for each test to avoid shared state
-    if (testServer) await testServer.close().catch(() => {});
     testServer = createAuthTestServer({ authUser: "admin", authPass: "s3cret" });
     port = await testServer.start();
   });
 
-  afterAll(async () => {
+  afterEach(async () => {
     if (testServer) await testServer.close().catch(() => {});
   });
 
@@ -827,12 +825,11 @@ describe("HTTP Auth Integration", () => {
   });
 });
 
-describe("HTTP Auth Disabled", () => {
+describe.sequential("HTTP Auth Disabled", () => {
   let testServer: ReturnType<typeof createAuthTestServer>;
   let port: number;
 
   beforeEach(async () => {
-    if (testServer) await testServer.close().catch(() => {});
     testServer = createAuthTestServer({
       authUser: "",
       authPass: "",
@@ -841,7 +838,7 @@ describe("HTTP Auth Disabled", () => {
     port = await testServer.start();
   });
 
-  afterAll(async () => {
+  afterEach(async () => {
     if (testServer) await testServer.close().catch(() => {});
   });
 
