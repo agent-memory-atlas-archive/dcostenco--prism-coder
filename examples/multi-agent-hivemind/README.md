@@ -129,8 +129,8 @@ On session end:
 
 ## Dashboard View
 
-Open the tokenized dashboard URL from the Prism startup log (e.g.
-`http://localhost:3000/?token=<random>`) to see the **Hivemind Radar** panel:
+Run `prism dashboard` to open the local dashboard and see the
+**Hivemind Radar** panel. Prism Free does not require a Synalux account:
 - Active agent roster with roles, tasks, and heartbeat timestamps
 - Color-coded health indicators: 🟢 Active, 🟡 Stale, 🔴 Frozen, ⏰ Overdue, 🔄 Looping
 - Loop detection badges (if an agent repeats the same task 5+ times)

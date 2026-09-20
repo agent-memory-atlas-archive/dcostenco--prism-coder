@@ -36,6 +36,11 @@ import { runBrowserCli } from './browserCli.js';
 import { filterPrismMemoryContext } from './utils/memoryQuality.js';
 import { isRecoverableStartupStorageError } from './utils/startupRecovery.js';
 import { verifyBehaviorHandler } from './tools/behavioralVerifierHandler.js';
+import {
+  isLocalDashboardRunning,
+  openDashboardUrl,
+  readDashboardAccessState,
+} from './dashboard/dashboardAccess.js';
 
 const program = new Command();
 
@@ -149,6 +154,28 @@ program
   .command('bootstrap')
   .description('Print the canonical dashboard-configured first-turn Prism greeting')
   .action(runBootstrapCommand);
+
+program
+  .command('dashboard')
+  .description('Open the current local Mind Palace dashboard (no Synalux account required)')
+  .option('--print', 'Print the current local dashboard link instead of opening a browser')
+  .action(async (options: { print?: boolean }) => {
+    try {
+      const { url, probeKey } = readDashboardAccessState();
+      if (!(await isLocalDashboardRunning(url, probeKey))) {
+        throw new Error('The recorded Prism dashboard is not running. Restart your connected MCP host first.');
+      }
+      if (options.print) {
+        console.log(url);
+        return;
+      }
+      openDashboardUrl(url);
+      console.log('Opened the local Prism Free dashboard. No Synalux account is required.');
+    } catch (error) {
+      console.error(`Dashboard unavailable: ${error instanceof Error ? error.message : String(error)}`);
+      process.exitCode = 1;
+    }
+  });
 
 interface VerifyBehaviorCliOptions {
   file: string;

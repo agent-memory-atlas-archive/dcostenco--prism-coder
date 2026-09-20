@@ -14,6 +14,38 @@
  * ═══════════════════════════════════════════════════════════════════
  */
 
+export function renderDashboardLocalOpenHTML(): string {
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Prism — Open Local Dashboard</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 24px; background: #0a0e1a; color: #f1f5f9; font-family: Inter, system-ui, sans-serif; }
+    main { width: min(620px, 100%); padding: 36px; border: 1px solid rgba(139,92,246,.35); border-radius: 20px; background: #111827; box-shadow: 0 24px 80px rgba(0,0,0,.35); }
+    .eyebrow { color: #22d3ee; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; font-size: 13px; }
+    h1 { margin: 12px 0; font-size: clamp(30px, 6vw, 46px); line-height: 1.05; }
+    p { color: #a5b4cf; font-size: 17px; line-height: 1.6; }
+    code { display: block; margin: 24px 0 12px; padding: 16px 18px; border-radius: 12px; background: #080d19; border: 1px solid #293554; color: #c4b5fd; font: 600 18px ui-monospace, SFMono-Regular, Menlo, monospace; }
+    button { width: 100%; padding: 14px 18px; border: 0; border-radius: 12px; color: white; background: linear-gradient(135deg,#8b5cf6,#2563eb); font: 700 16px Inter,system-ui,sans-serif; cursor: pointer; }
+    .note { margin-top: 18px; color: #71809c; font-size: 14px; }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="eyebrow">Local Prism Free</div>
+    <h1>No account is required.</h1>
+    <p>This browser needs the current local dashboard link after Prism starts. Run this command in Terminal; it opens the dashboard directly without Synalux sign-in or plan redemption.</p>
+    <code>prism dashboard</code>
+    <button type="button" onclick="navigator.clipboard.writeText('prism dashboard').then(() => { this.textContent = 'Copied'; })">Copy command</button>
+    <p class="note">Synalux sign-in remains optional for cloud sync, billing, and paid features.</p>
+  </main>
+</body>
+</html>`;
+}
+
 export function renderDashboardHTML(version: string): string {
     return `<!DOCTYPE html>
 <html lang="en">
@@ -528,6 +560,9 @@ export function renderDashboardHTML(version: string): string {
     .account-connect {
       padding: 1rem; border: 1px solid var(--border-glass); border-radius: var(--radius-sm); background: rgba(15,23,42,0.42);
     }
+    .account-connect summary { cursor: pointer; color: var(--text-secondary); font-size: 0.8rem; font-weight: 600; }
+    .account-connect summary::marker { color: var(--accent-purple); }
+    .account-connect[open] summary { margin-bottom: 0.8rem; color: var(--text-primary); }
     .account-connect label { display: block; margin-bottom: 0.45rem; color: var(--text-primary); font-size: 0.8rem; font-weight: 600; }
     .account-code-row { display: flex; gap: 0.6rem; }
     .account-code-input {
@@ -2127,13 +2162,14 @@ function renderAccountPanel(account, error) {
             '<div class="account-card-head"><div><div class="account-badges">' +
             '<span class="account-badge">Free</span><span class="account-badge role">Local</span></div>' +
             '<div class="account-name">Prism Free</div><div class="account-summary">' + accountPlanSummary('free') +
-            ' Sign in to add cloud sync, larger models, and team features.</div></div></div>' +
-            '<div class="account-actions"><button class="account-action" onclick="startAccountSignIn()">Sign in</button>' +
+            ' No sign-in or redemption is required. Link a Synalux account only for cloud sync, larger models, or team features.</div></div></div>' +
+            '<div class="account-actions"><button class="account-action" onclick="startAccountSignIn()">Link Synalux account</button>' +
             '<button class="account-action secondary" onclick="openAccountBilling()">View plans</button></div></div>' +
-            '<div class="account-connect"><label for="accountCodeInput">Complete sign-in with a one-time code</label>' +
+            '<details class="account-connect" id="accountConnectDetails"><summary>Already have a Synalux account-link code? (optional)</summary>' +
+            '<label for="accountCodeInput">Account-link code</label>' +
             '<div class="account-code-row"><input class="account-code-input" id="accountCodeInput" autocomplete="off" spellcheck="false" placeholder="synalux_code_…" />' +
             '<button class="account-action" id="accountConnectButton" onclick="connectAccount()">Connect account</button></div>' +
-            '<div class="account-status" id="accountStatus">Sign in opens Synalux in a new tab. Paste the code shown there.</div></div>' +
+            '<div class="account-status" id="accountStatus">Use this only after choosing Link Synalux account. Prism Free is already active locally.</div></details>' +
             renderPlanLadder('free');
         return;
     }
@@ -2186,8 +2222,14 @@ function loadIdentityChip() {
 }
 function startAccountSignIn() {
     var url = currentAccount && currentAccount.auth_url ? currentAccount.auth_url : 'https://synalux.ai/auth?source=prism';
+    var details = document.getElementById('accountConnectDetails');
+    if (details)
+        details.open = true;
     window.open(url, '_blank', 'noopener,noreferrer');
     setAccountStatus('Finish sign-in in Synalux, then paste the one-time code here.');
+    var input = document.getElementById('accountCodeInput');
+    if (input)
+        input.focus();
 }
 function openAccountBilling() {
     var target = window.open('about:blank', '_blank');

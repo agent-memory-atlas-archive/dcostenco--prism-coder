@@ -27,7 +27,14 @@ import { createServer, getAllPossibleTools } from "../server.js";
 import { getStorage, activeStorageBackend } from "../storage/index.js";
 import { readDashboardLedger } from "./ledgerReader.js";
 import { PRISM_USER_ID, SERVER_CONFIG } from "../config.js";
-import { renderDashboardHTML } from "./ui.js";
+import { renderDashboardHTML, renderDashboardLocalOpenHTML } from "./ui.js";
+import { writeDashboardAccessUrl } from "./dashboardAccess.js";
+import {
+  createDashboardProbeResponse,
+  DASHBOARD_PROBE_PATH,
+  generateDashboardProbeKey,
+  verifyDashboardProbeRequest,
+} from "./dashboardProbe.js";
 import { computeIntentHealth } from "./intentHealth.js";
 import { getAllSettings, setSetting, getSetting, getSettingSync } from "../storage/configStorage.js";
 import { compactLedgerHandler } from "../tools/compactionHandler.js";
@@ -43,6 +50,7 @@ import {
   requestHasToken,
   buildTokenCookie,
   dashboardTokenCookieName,
+  isDashboardTokenProtectedPath,
 } from "./dashboardToken.js";
 import {
   safeCompare,
@@ -131,6 +139,7 @@ export async function startDashboardServer(): Promise<void> {
     pinnedToken: process.env.PRISM_DASHBOARD_TOKEN,
     optOut: process.env.PRISM_DASHBOARD_NO_TOKEN,
   });
+  const DASHBOARD_PROBE_KEY = generateDashboardProbeKey();
   const COOKIE_SECURE =
     !!process.env.PRISM_DASHBOARD_ORIGIN?.startsWith("https://") || !!process.env.PRISM_DASHBOARD_SECURE;
 
@@ -268,6 +277,25 @@ return false;}
     // ─── v5.1: Auth login endpoint (always accessible) ───
     const reqUrl = new URL(req.url || "/", `http://${req.headers.host}`);
 
+    // Authenticate the recorded listener before the CLI opens a browser. The
+    // request and response use domain-separated HMACs over a fresh nonce, so a
+    // foreign process that copied the public manifest cannot impersonate this
+    // dashboard or learn the local dashboard capability from the probe.
+    if (req.method === "GET" && reqUrl.pathname === DASHBOARD_PROBE_PATH) {
+      const nonce = reqUrl.searchParams.get("nonce") || "";
+      const requestProof = reqUrl.searchParams.get("proof") || "";
+      if (!verifyDashboardProbeRequest(DASHBOARD_PROBE_KEY, nonce, requestProof)) {
+        res.writeHead(401, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+        return res.end(JSON.stringify({ error: "Invalid dashboard probe" }));
+      }
+      res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+      return res.end(JSON.stringify({
+        name: "Prism Mind Palace",
+        nonce,
+        proof: createDashboardProbeResponse(DASHBOARD_PROBE_KEY, nonce),
+      }));
+    }
+
     // ─── SECURITY: dashboard token gate (GHSA-9cvx-7x8q-3g6m, remediation #2) ───
     // Second layer beneath the Host guard. Inert when DASHBOARD_TOKEN is null
     // (real auth configured, or opted out). A page load carrying a valid ?token=
@@ -276,35 +304,45 @@ return false;}
     // token via cookie, X-Prism-Dashboard-Token header, or ?token= query.
     if (DASHBOARD_TOKEN) {
       const qToken = reqUrl.searchParams.get("token");
-      const isApiPath = reqUrl.pathname.startsWith("/api/");
+      const isApiPath = isDashboardTokenProtectedPath(reqUrl.pathname);
+      const cookieName = dashboardTokenCookieName(req.socket.localPort!);
+      const hasToken = requestHasToken(
+        {
+          cookie: req.headers.cookie,
+          headerToken: (req.headers["x-prism-dashboard-token"] as string) || null,
+        },
+        qToken,
+        DASHBOARD_TOKEN,
+        cookieName,
+      );
 
       if (!isApiPath && qToken && safeCompare(qToken, DASHBOARD_TOKEN)) {
         reqUrl.searchParams.delete("token");
         const cleanTarget = reqUrl.pathname + (reqUrl.search ? reqUrl.search : "");
         res.writeHead(302, {
-          "Set-Cookie": buildTokenCookie(DASHBOARD_TOKEN, SESSION_TTL_MS, COOKIE_SECURE, dashboardTokenCookieName(req.socket.localPort!)),
+          "Set-Cookie": buildTokenCookie(DASHBOARD_TOKEN, SESSION_TTL_MS, COOKIE_SECURE, cookieName),
           Location: cleanTarget,
         });
         return res.end();
       }
 
       if (
-        isApiPath &&
-        !requestHasToken(
-          {
-            cookie: req.headers.cookie,
-            headerToken: (req.headers["x-prism-dashboard-token"] as string) || null,
-          },
-          qToken,
-          DASHBOARD_TOKEN,
-          dashboardTokenCookieName(req.socket.localPort!),
-        )
+        req.method === "GET" &&
+        (reqUrl.pathname === "/" || reqUrl.pathname === "/index.html") &&
+        !hasToken
       ) {
+        res.writeHead(200, {
+          "Content-Type": "text/html; charset=utf-8",
+          "Cache-Control": "no-store, no-cache, must-revalidate",
+        });
+        return res.end(renderDashboardLocalOpenHTML());
+      }
+
+      if (isApiPath && !hasToken) {
         res.writeHead(401, { "Content-Type": "application/json" });
         return res.end(
           JSON.stringify({
-            error:
-              "Dashboard token required — open the tokenized URL printed in the Prism startup log.",
+            error: "Local dashboard access required — run prism dashboard.",
           }),
         );
       }
@@ -450,6 +488,32 @@ return false;}
         res.writeHead(500, { "Content-Type": "application/json" });
         return res.end(JSON.stringify({ error: err.message || "Failed to generate server card" }));
       }
+    }
+
+    // Public PWA metadata also serves as the CLI's bounded local identity
+    // probe. It contains no dashboard data and must remain reachable when an
+    // operator configures Basic Auth or JWKS for the actual dashboard.
+    if (reqUrl.pathname === "/manifest.json" && req.method === "GET") {
+      const manifest = {
+        name: "Prism Mind Palace",
+        short_name: "Prism",
+        description: "Prism MCP Mobile Dashboard",
+        start_url: "/",
+        display: "standalone",
+        background_color: "#0a0e1a",
+        theme_color: "#0a0e1a",
+        icons: [
+          { src: "/icon-192.svg", sizes: "192x192", type: "image/svg+xml", purpose: "any" },
+          { src: "/icon-192-maskable.svg", sizes: "192x192", type: "image/svg+xml", purpose: "maskable" },
+          { src: "/icon-512.svg", sizes: "512x512", type: "image/svg+xml", purpose: "any" },
+          { src: "/icon-512-maskable.svg", sizes: "512x512", type: "image/svg+xml", purpose: "maskable" },
+        ],
+      };
+      res.writeHead(200, {
+        "Content-Type": "application/json",
+        "Cache-Control": "public, max-age=86400",
+      });
+      return res.end(JSON.stringify(manifest));
     }
 
     // ─── AUTHENTICATION GATE ───
@@ -1224,29 +1288,6 @@ return false;}
       }
 
 
-      if (url.pathname === "/manifest.json" && req.method === "GET") {
-        const manifest = {
-          name: "Prism Mind Palace",
-          short_name: "Prism",
-          description: "Prism MCP Mobile Dashboard",
-          start_url: "/",
-          display: "standalone",
-          background_color: "#0a0e1a",
-          theme_color: "#0a0e1a",
-          icons: [
-            { src: "/icon-192.svg", sizes: "192x192", type: "image/svg+xml", purpose: "any" },
-            { src: "/icon-192-maskable.svg", sizes: "192x192", type: "image/svg+xml", purpose: "maskable" },
-            { src: "/icon-512.svg", sizes: "512x512", type: "image/svg+xml", purpose: "any" },
-            { src: "/icon-512-maskable.svg", sizes: "512x512", type: "image/svg+xml", purpose: "maskable" }
-          ]
-        };
-        res.writeHead(200, {
-          "Content-Type": "application/json",
-          "Cache-Control": "public, max-age=86400"
-        });
-        return res.end(JSON.stringify(manifest));
-      }
-
       // ─── PWA: Service Worker (v5.4) ───
       if (url.pathname === "/sw.js" && req.method === "GET") {
         const swContent = `
@@ -1549,24 +1590,31 @@ self.addEventListener('message', (e) => {
     }
   }
 
-  // Write the active port to a file for discoverability
+  const dashboardUrl = DASHBOARD_TOKEN
+    ? `http://localhost:${boundPort}/?token=${DASHBOARD_TOKEN}`
+    : `http://localhost:${boundPort}/`;
+
+  // Write the active port and owner-only local opener link for discoverability.
   try {
     const portFile = path.join(os.homedir(), ".prism-mcp", "dashboard.port");
     fs.writeFileSync(portFile, String(boundPort), "utf8");
   } catch {
     // Non-fatal — just means the user has to know the port
   }
+  try {
+    writeDashboardAccessUrl(dashboardUrl, os.homedir(), DASHBOARD_PROBE_KEY);
+  } catch (error) {
+    console.error(`[Dashboard] Could not save local opener link: ${error instanceof Error ? error.message : String(error)}`);
+  }
 
   if (DASHBOARD_TOKEN) {
     console.error(
-      `[Prism] 🔐 Mind Palace Dashboard → http://localhost:${boundPort}/?token=${DASHBOARD_TOKEN}`
-    );
-    console.error(
-      `[Prism]    Data API is token-gated by default (GHSA-9cvx-7x8q-3g6m). Open the URL above once; ` +
+      `[Prism] 🔐 Mind Palace Dashboard ready on http://localhost:${boundPort}. ` +
+      `Run prism dashboard to open locally without a Synalux account; ` +
       `pin it with PRISM_DASHBOARD_TOKEN, or disable with PRISM_DASHBOARD_NO_TOKEN=1.`
     );
   } else {
-    console.error(`[Prism] 🧠 Mind Palace Dashboard → http://localhost:${boundPort}`);
+    console.error(`[Prism] 🧠 Mind Palace Dashboard → ${dashboardUrl}`);
   }
 
   // ─── v3.1: TTL Sweep — runs at startup + every 12 hours ───────────

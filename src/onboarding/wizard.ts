@@ -235,7 +235,7 @@ function getCompleteContent(): WizardStepContent {
             "Your AI agents now have persistent, searchable memory across all sessions.",
         instructions: [
             "📖 Full documentation: https://github.com/synalux/prism",
-            "🎛️ Dashboard: http://localhost:3080 (when server is running)",
+            "🎛️ Dashboard: run `prism dashboard` after the MCP host starts (no account required)",
             "💬 Community: GitHub Discussions for questions and feedback",
             "🐛 Issues: GitHub Issues for bug reports",
         ],

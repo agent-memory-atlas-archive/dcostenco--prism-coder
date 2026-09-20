@@ -436,16 +436,20 @@ The Mind Palace dashboard launches automatically alongside the MCP server.
 | Setting | Default | Notes |
 |---------|---------|-------|
 | Port | `3000` | Override with `PRISM_DASHBOARD_PORT` |
-| URL | `http://localhost:3000/?token=…` | Tokenized URL printed to the startup log |
+| Open | `prism dashboard` | Opens the current local link; no Synalux account required |
 | Access | Loopback-only + per-startup token | Host/Origin-validated; see below |
 
-**Open the tokenized URL printed in the Prism startup log**, e.g.
-`http://localhost:3000/?token=<random>`. Opening it once stores a `SameSite`
-cookie, so later visits to `http://localhost:3000` work for the rest of the
-session. The data API (`/api/*`) rejects requests without the token, and rejects
+Run **`prism dashboard`** after the MCP host starts. It opens the current local
+link and stores a `SameSite` browser cookie, so Prism Free needs no account or
+plan redemption. The data API (`/api/*`) rejects requests without the local
+token, and rejects
 any request whose `Host`/`Origin` is not loopback or your configured
 `PRISM_DASHBOARD_ORIGIN` — this closes the DNS-rebinding exposure fixed in
 GHSA-9cvx-7x8q-3g6m.
+
+The local token protects the browser boundary. It does not isolate Prism from
+other processes running under the same operating-system account, which can read
+that account's owner-only Prism state.
 
 The startup display reads Agent Name, Default Role, Context Depth, and Auto-Load
 Projects from this dashboard. Do not hardcode a project or depth in host rules;
@@ -454,9 +458,9 @@ every connected agent on its next conversation.
 
 ### Securing the dashboard
 
-**Default token (no config needed)** — with no auth configured, the dashboard
-mints a random token each startup and gates `/api/*` with it. Open the tokenized
-URL from the startup log. To control it:
+**Default token (no config needed)** — with no remote auth configured, the
+dashboard gates `/api/*` with a local token. Run `prism dashboard` to open it.
+To control it:
 
 ```json
 "env": {

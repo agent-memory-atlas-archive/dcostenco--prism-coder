@@ -14,6 +14,7 @@ import {
   tokenFromCookie,
   buildTokenCookie,
   dashboardTokenCookieName,
+  isDashboardTokenProtectedPath,
 } from "../../src/dashboard/dashboardToken.js";
 
 describe("dashboard token gate (GHSA-9cvx-7x8q-3g6m #2)", () => {
@@ -149,5 +150,12 @@ describe("dashboard token gate (GHSA-9cvx-7x8q-3g6m #2)", () => {
     it("adds Secure when requested", () => {
       expect(buildTokenCookie("tok", 1000, true)).toContain("; Secure");
     });
+  });
+
+  it("keeps optional Synalux account linking behind the independent local gate", () => {
+    expect(isDashboardTokenProtectedPath("/api/account/connect")).toBe(true);
+    expect(isDashboardTokenProtectedPath("/api/account")).toBe(true);
+    expect(isDashboardTokenProtectedPath("/api/projects")).toBe(true);
+    expect(isDashboardTokenProtectedPath("/")).toBe(false);
   });
 });

@@ -58,12 +58,14 @@ A paid subscription adds cloud sync, higher model tiers, and team features throu
 ```bash
 npm install -g prism-mcp-server
 prism connect
+prism dashboard
 ```
 
 Use `prism connect --dry-run` to preview changes, `prism connect --all` to
 configure every detected host, or `prism connect --refresh` to reconcile
 Prism-managed entries after an upgrade. Restart the host after connecting.
 
+`prism dashboard` opens the current local Mind Palace without a Synalux login.
 Prism works locally without an account, API key, or cloud subscription. Add a
 Synalux subscription when you want cloud memory, paid-tier skills, or team
 features.
@@ -148,6 +150,20 @@ or by re-enabling after each run.
 
 <details>
 <summary>Release history (optional)</summary>
+
+## What's New in v20.21.9
+
+### Prism Free opens without a Synalux account
+
+- Run `prism dashboard` to open the current local Mind Palace. No sign-in,
+  account-link code, API key, paid plan, or Free-plan redemption is required.
+- A bare local dashboard address now gives the exact local-open command instead
+  of rendering a broken account state.
+- Account & Settings shows Prism Free as active. Synalux linking remains an
+  optional action for cloud sync, billing, and paid features.
+- Local access stays protected without printing its browser capability into
+  startup output, and unsafe state paths or redirected identity probes fail
+  closed.
 
 ## What's New in v20.21.8
 
@@ -929,8 +945,9 @@ Every conversation feeds a persistent store. The next session loads the right co
 
 The dashboard shows your current project state, pending TODOs, intent health, and a neural knowledge graph — all built automatically from your agent sessions.
 
-It runs on loopback and is gated by a per-startup token by default — open the
-tokenized URL printed in the startup log (`http://localhost:3000/?token=…`).
+It runs on loopback and is gated by a local token by default — run
+`prism dashboard` to open it without signing in. This local browser step is not
+a Free-plan redemption.
 Requests with an untrusted `Host`/`Origin` are refused, closing the DNS-rebinding
 exposure fixed in GHSA-9cvx-7x8q-3g6m. See [docs/IDE_SETUP.md](docs/IDE_SETUP.md#securing-the-dashboard)
 to pin the token, disable it, or configure Basic Auth / JWKS.
