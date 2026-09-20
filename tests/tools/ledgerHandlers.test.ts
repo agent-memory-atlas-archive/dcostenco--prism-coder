@@ -1294,7 +1294,7 @@ describe("ledgerHandlers", () => {
       expect(text).not.toContain("Not loaded");
     });
 
-    it("advertises the dashboard URL only when something is actually listening", async () => {
+    it("advertises the accountless local opener only when the Prism dashboard is listening", async () => {
       mockGetSetting.mockImplementation(async (key: string, fallback = "") => ({
         "skill_manifest:tier": "free",
         "skill_manifest:names": JSON.stringify(["prism-startup"]),
@@ -1331,15 +1331,22 @@ describe("ledgerHandlers", () => {
           await new Promise((done) => foreign.server.close(() => done(null)));
         }
 
-        // A real dashboard answers /api/health with 200 and IS advertised.
+        // A real dashboard answers with the public Prism manifest and IS advertised.
         const real = await serve((req, res) => {
-          if (req.url === "/api/health") { res.statusCode = 200; res.end("{}"); return; }
+          if (req.url === "/manifest.json") {
+            res.setHeader("Content-Type", "application/json");
+            res.statusCode = 200;
+            res.end(JSON.stringify({ name: "Prism Mind Palace" }));
+            return;
+          }
           res.statusCode = 404; res.end();
         });
         process.env.PRISM_DASHBOARD_PORT = String(real.port);
         try {
           const live = (await sessionBootstrapHandler({})).content[0].text as string;
-          expect(live).toContain(`http://localhost:${real.port}`);
+          expect(live).toContain("run `prism dashboard`");
+          expect(live).toContain("no Synalux account required");
+          expect(live).not.toContain(`http://localhost:${real.port}/?token=`);
         } finally {
           await new Promise((done) => real.server.close(() => done(null)));
         }

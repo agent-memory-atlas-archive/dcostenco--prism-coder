@@ -123,8 +123,8 @@ node dist/server.js
 
 ### 4. Verify
 
-Open the Mind Palace Dashboard using the tokenized URL from the startup log
-(e.g. `http://localhost:3333/?token=<random>`) and click **Scholar (Run)**.
+Run `prism dashboard` to open the local Mind Palace Dashboard, then click
+**Scholar (Run)**. Prism Free does not require a Synalux account.
 When the run finishes, a new ledger entry whose summary starts with
 `Research: <topic>` is saved (event type `learning`, importance 7).
 

@@ -708,10 +708,9 @@ function freeTierUpgradeLine(tier: string): string {
 }
 
 /**
- * Dashboard URL for startup output. The bound port is announced on stderr
- * only (MCP stdio owns stdout), so users never saw it; the dashboard also
- * writes the port to ~/.prism-mcp/dashboard.port — read that, then the env
- * override, then the default.
+ * Detect the local dashboard for startup output. The browser link may contain
+ * a private localhost capability, so startup advertises the local CLI opener
+ * rather than copying that link into agent context.
  */
 async function readDashboardUrl(): Promise<string | null> {
   // Precedence: explicit env override > recorded port file > default. The
@@ -732,16 +731,25 @@ async function readDashboardUrl(): Promise<string | null> {
   // URL as the first-run headline action is worse than omitting it.
   //
   // A TCP connect is NOT sufficient: it proves something is listening, not
-  // that it is Prism. The default is 3000 — the single most commonly occupied
-  // port on a developer machine — so a bare liveness check would confidently
-  // point a first-run user at their own dev server. Hit the dashboard's
-  // /api/health instead, so identity is verified rather than assumed.
+  // that it is Prism. Probe the public PWA manifest instead of a token-gated API
+  // so an accountless install is detected without weakening dashboard access.
   const healthy = await new Promise<boolean>((resolveProbe) => {
     const request = http.get(
-      { host: "127.0.0.1", port: Number(port), path: "/api/health", timeout: 300 },
+      { host: "127.0.0.1", port: Number(port), path: "/manifest.json", timeout: 300 },
       (response) => {
-        response.resume(); // drain so the socket can close
-        resolveProbe(response.statusCode === 200);
+        let body = "";
+        response.setEncoding("utf8");
+        response.on("data", (chunk) => {
+          if (body.length <= 4096) body += String(chunk);
+        });
+        response.on("end", () => {
+          try {
+            const parsed = JSON.parse(body) as { name?: string };
+            resolveProbe(response.statusCode === 200 && parsed.name === "Prism Mind Palace");
+          } catch {
+            resolveProbe(false);
+          }
+        });
       },
     );
     request.once("timeout", () => { request.destroy(); resolveProbe(false); });
@@ -2627,7 +2635,7 @@ export async function sessionBootstrapHandler(
   if (projects.length === 0) {
     const dashboardUrl = await readDashboardUrl();
     const dashboardLine = dashboardUrl
-      ? `- 🎛️ **Dashboard:** ${dashboardUrl} — configure projects, identity, and context depth`
+      ? `- 🎛️ **Dashboard:** run \`prism dashboard\` — opens locally with no Synalux account required`
       : `- 🎛️ **Dashboard:** not running — start Prism's dashboard to configure projects, identity, and context depth`;
     if (isFirstRun) {
       // Action-first instead of absence-first: every line is a capability or

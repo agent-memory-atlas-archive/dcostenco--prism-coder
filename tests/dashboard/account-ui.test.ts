@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { JSDOM, VirtualConsole } from "jsdom";
-import { renderDashboardHTML } from "../../src/dashboard/ui.js";
+import { renderDashboardHTML, renderDashboardLocalOpenHTML } from "../../src/dashboard/ui.js";
 
 const pages: JSDOM[] = [];
 
@@ -74,6 +74,14 @@ async function openDashboard(account: AccountFixture | { error: string }, accoun
 }
 
 describe("dashboard Account & Subscription UX", () => {
+  it("explains local browser access without presenting account redemption as a Free requirement", () => {
+    const html = renderDashboardLocalOpenHTML();
+    expect(html).toContain("No account is required");
+    expect(html).toContain("prism dashboard");
+    expect(html).toContain("without Synalux sign-in or plan redemption");
+    expect(html).not.toContain("synalux_code_");
+  });
+
   it("makes Account the first settings view while preserving every specialist view", async () => {
     const { page, doc } = await openDashboard(fixture("free"));
     expect(doc.getElementById("stab-account")?.classList.contains("active")).toBe(true);
@@ -83,8 +91,8 @@ describe("dashboard Account & Subscription UX", () => {
     expect(page.window.getComputedStyle(doc.querySelector(".main-tabs") as Element).overflowX).toBe("auto");
   });
 
-  it("shows a discoverable signed-out Free state with Sign in, View plans, and code completion", async () => {
-    const { doc } = await openDashboard(fixture("free", {
+  it("shows an active signed-out Free state with optional account linking and plan discovery", async () => {
+    const { page, doc } = await openDashboard(fixture("free", {
       signed_in: false,
       configured: false,
       name: null,
@@ -92,9 +100,16 @@ describe("dashboard Account & Subscription UX", () => {
     }));
     expect(doc.getElementById("identityChip")?.textContent).toContain("Free");
     expect(doc.getElementById("accountPanel")?.textContent).toContain("Prism Free");
-    expect(doc.getElementById("accountPanel")?.textContent).toContain("Sign in");
+    expect(doc.getElementById("accountPanel")?.textContent).toContain("No sign-in or redemption is required");
+    expect(doc.getElementById("accountPanel")?.textContent).toContain("Link Synalux account");
     expect(doc.getElementById("accountPanel")?.textContent).toContain("View plans");
+    expect(doc.getElementById("accountPanel")?.textContent).toContain("Already have a Synalux account-link code? (optional)");
     expect(doc.getElementById("accountCodeInput")).not.toBeNull();
+    const details = doc.getElementById("accountConnectDetails") as HTMLDetailsElement;
+    expect(details.open).toBe(false);
+    (page.window as unknown as { startAccountSignIn: () => void }).startAccountSignIn();
+    expect(details.open).toBe(true);
+    expect(page.window.open).toHaveBeenCalledWith("https://synalux.ai/auth?source=prism", "_blank", "noopener,noreferrer");
   });
 
   it("shows the authenticated user, role, Free plan, upgrade action, and sign out", async () => {

@@ -78,3 +78,8 @@ export function buildTokenCookie(token: string, maxAgeMs: number, secure: boolea
     `Max-Age=${Math.floor(maxAgeMs / 1000)}${secure ? "; Secure" : ""}`
   );
 }
+
+/** Every dashboard data API, including optional account linking, uses the local gate. */
+export function isDashboardTokenProtectedPath(pathname: string): boolean {
+  return pathname.startsWith('/api/');
+}

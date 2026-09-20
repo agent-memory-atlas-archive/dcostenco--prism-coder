@@ -2,6 +2,27 @@
 
 All notable changes to this project will be documented in this file.
 
+## 20.21.9 — 2026-09-19
+
+### Prism Free opens locally without account redemption
+
+The dashboard previously presented its local browser-access check as an account
+failure. A signed-out Free user could reach Synalux, receive an account-link
+code, and return to a dashboard with no place to use it because local access and
+optional account linking are separate controls.
+
+`prism dashboard` now opens the current local Mind Palace directly. Visiting a
+bare local dashboard address explains that no Synalux account, API key, paid
+plan, or redemption is required. Once open, Account & Settings shows Prism Free
+as active and keeps Synalux linking behind an explicit optional action for cloud
+sync, billing, and paid features.
+
+The local browser capability is stored in an owner-only file, is no longer
+printed into startup context or logs, rejects symlinked state paths, and cannot
+be sent through a redirecting liveness probe. Account-link requests remain
+behind the independent local dashboard gate. Shipped documentation and examples
+now use the command-based opener instead of asking users to copy a startup URL.
+
 ## 20.21.8 — 2026-09-19
 
 ### The dashboard graph works without a Gemini key
