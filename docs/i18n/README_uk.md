@@ -151,6 +151,18 @@ or by re-enabling after each run.
 <details>
 <summary>Release history (optional)</summary>
 
+## What's New in v20.21.10
+
+### Signed-out Free dashboards keep working locally
+
+- Signing out now switches Project View, project details, and graph reads to
+  local SQLite without requiring an account, configuration edit, or restart.
+- The saved Synalux backend preference remains ready for the next sign-in;
+  accidental missing cloud credentials still fail closed.
+- Latest Activity uses the newest durable session when it is newer than the
+  saved handoff. Recent Sessions are newest first, and saved handoff versions
+  remain available as restore points.
+
 ## What's New in v20.21.9
 
 ### Prism Free opens without a Synalux account
