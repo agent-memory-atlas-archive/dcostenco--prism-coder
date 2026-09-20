@@ -166,7 +166,10 @@ async function reserveLoopbackPort(): Promise<number> {
 describe('CLI Integration — accountless Prism Free dashboard', { timeout: 30_000 }, () => {
   const cliPath = path.resolve(__dirname, '../../dist/cli.js');
   const dashboardModule = pathToFileURL(path.resolve(__dirname, '../../dist/dashboard/server.js')).href;
+  const configStorageModule = pathToFileURL(path.resolve(__dirname, '../../dist/storage/configStorage.js')).href;
+  const sqliteStorageModule = pathToFileURL(path.resolve(__dirname, '../../dist/storage/sqlite.js')).href;
   const localToken = 'integration-local-capability';
+  const localProject = 'signed-out-local-project';
   let home: string;
   let port: number;
   let dashboardProcess: ChildProcess | null = null;
@@ -187,7 +190,11 @@ describe('CLI Integration — accountless Prism Free dashboard', { timeout: 30_0
       PRISM_DASHBOARD_PASS: '',
       PRISM_JWKS_URI: '',
       AUTH_JWKS_URI: '',
-      PRISM_STORAGE: 'local',
+      // Preserve a user's cloud preference while proving deliberate sign-out
+      // still serves the local Free dashboard without a restart.
+      PRISM_STORAGE: 'synalux',
+      PRISM_SYNALUX_BASE_URL: 'https://portal.synalux.example',
+      PRISM_SYNALUX_API_KEY: 'stale-token-must-not-be-used',
       PRISM_DATA_DIR: path.join(home, 'data'),
       PRISM_CONFIG_PATH: path.join(home, 'config.db'),
       PRISM_SKILL_SYNC_DISABLED: 'true',
@@ -198,7 +205,31 @@ describe('CLI Integration — accountless Prism Free dashboard', { timeout: 30_0
       [
         '--input-type=module',
         '--eval',
-        `const { startDashboardServer } = await import(${JSON.stringify(dashboardModule)}); await startDashboardServer();`,
+        `
+          const { setSetting } = await import(${JSON.stringify(configStorageModule)});
+          await setSetting('PRISM_SYNALUX_SIGNED_OUT', 'true');
+          await setSetting('PRISM_SYNALUX_API_KEY', '');
+          const { SqliteStorage } = await import(${JSON.stringify(sqliteStorageModule)});
+          const local = new SqliteStorage();
+          await local.initialize(true);
+          await local.saveHandoff({
+            project: ${JSON.stringify(localProject)},
+            user_id: 'default',
+            last_summary: 'Signed-out local handoff',
+            pending_todo: ['Keep local projects available'],
+            keywords: ['local-free'],
+          });
+          await local.saveLedger({
+            project: ${JSON.stringify(localProject)},
+            conversation_id: 'signed-out-dashboard-regression',
+            user_id: 'default',
+            summary: 'Signed-out local session',
+            keywords: ['local-free'],
+          });
+          await local.close();
+          const { startDashboardServer } = await import(${JSON.stringify(dashboardModule)});
+          await startDashboardServer();
+        `,
       ],
       { cwd: path.resolve(__dirname, '../..'), env: dashboardEnv, stdio: ['ignore', 'ignore', 'pipe'] },
     );
@@ -266,6 +297,34 @@ describe('CLI Integration — accountless Prism Free dashboard', { timeout: 30_0
       signed_in: false,
       configured: false,
       plan: 'free',
+    });
+
+    const projects = await fetch(`http://127.0.0.1:${port}/api/projects`, {
+      headers: { Cookie: cookie ?? '' },
+    });
+    expect(projects.status).toBe(200);
+    await expect(projects.json()).resolves.toMatchObject({ projects: [localProject] });
+
+    const project = await fetch(
+      `http://127.0.0.1:${port}/api/project?name=${encodeURIComponent(localProject)}`,
+      { headers: { Cookie: cookie ?? '' } },
+    );
+    expect(project.status).toBe(200);
+    await expect(project.json()).resolves.toMatchObject({
+      context: { last_summary: 'Signed-out local handoff' },
+      ledger: [{ summary: 'Signed-out local session' }],
+    });
+
+    const graph = await fetch(
+      `http://127.0.0.1:${port}/api/graph?project=${encodeURIComponent(localProject)}`,
+      { headers: { Cookie: cookie ?? '' } },
+    );
+    expect(graph.status).toBe(200);
+    await expect(graph.json()).resolves.toMatchObject({
+      nodes: expect.arrayContaining([
+        expect.objectContaining({ id: localProject }),
+        expect.objectContaining({ id: 'local-free' }),
+      ]),
     });
 
     const accountCodeCannotUnlockLocalAccess = await fetch(`http://127.0.0.1:${port}/api/account/connect`, {

@@ -9,7 +9,7 @@ import { SupabaseStorage } from "./supabase.js";
 import type { StorageBackend } from "./interface.js";
 import { getSetting } from "./configStorage.js";
 import { upgradeInsecureCloudUrl } from "../utils/secureUrl.js";
-import { setSynaluxSignedOut } from "../utils/synaluxCredentialState.js";
+import { isSynaluxSignedOut, setSynaluxSignedOut } from "../utils/synaluxCredentialState.js";
 
 export function isValidHttpUrl(url: string): boolean {
   try {
@@ -163,12 +163,20 @@ export async function getStorage(): Promise<StorageBackend> {
   // (startupRecovery.ts): a missing credential is a configuration fault, not a
   // transient one, so startup must not paper over it with last-good context.
   if (requested === "synalux" && !(await ensureSynaluxCredentials())) {
-    throw new Error(
-      "[Prism Storage] PRISM_STORAGE=synalux but Synalux credentials are missing or invalid " +
-      "(need PRISM_SYNALUX_BASE_URL and PRISM_SYNALUX_API_KEY). " +
-      "Refusing to fall back to local storage because that silently splits session history. " +
-      "Set PRISM_STORAGE=local explicitly if local-only storage is intended.",
-    );
+    if (isSynaluxSignedOut()) {
+      // Sign-out is an explicit request to stop using the account. Keep the
+      // configured cloud preference intact for a later sign-in, but serve the
+      // unauthenticated Free dashboard from local SQLite in the meantime.
+      requested = "local";
+      debugLog("[Prism Storage] Synalux account signed out — using local SQLite");
+    } else {
+      throw new Error(
+        "[Prism Storage] PRISM_STORAGE=synalux but Synalux credentials are missing or invalid " +
+        "(need PRISM_SYNALUX_BASE_URL and PRISM_SYNALUX_API_KEY). " +
+        "Refusing to fall back to local storage because that silently splits session history. " +
+        "Set PRISM_STORAGE=local explicitly if local-only storage is intended.",
+      );
+    }
   }
   if (requested === "supabase" && !(await ensureSupabaseCredentials())) {
     throw new Error(
