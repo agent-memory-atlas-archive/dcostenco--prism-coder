@@ -16,9 +16,14 @@ import {
   dashboardOpenCommand,
   isLocalDashboardRunning,
   openDashboardUrl,
+  readDashboardAccessState,
   readDashboardAccessUrl,
   writeDashboardAccessUrl,
 } from "../../src/dashboard/dashboardAccess.js";
+import {
+  createDashboardProbeResponse,
+  generateDashboardProbeKey,
+} from "../../src/dashboard/dashboardProbe.js";
 
 const tempHomes: string[] = [];
 const servers: Server[] = [];
@@ -43,6 +48,7 @@ describe("accountless local dashboard access", () => {
 
     expect(path).toBe(dashboardAccessUrlPath(home));
     expect(readDashboardAccessUrl(home)).toBe(url);
+    expect(readDashboardAccessState(home).probeKey).toMatch(/^[a-f0-9]{64}$/);
     if (process.platform !== "win32") expect(statSync(path).mode & 0o777).toBe(0o600);
   });
 
@@ -99,17 +105,41 @@ describe("accountless local dashboard access", () => {
     expect(runner).toHaveBeenCalledWith("open", [url]);
   });
 
-  it("probes only the public local manifest and does not transmit the capability", async () => {
-    const fetcher = vi.fn(async () => new Response(JSON.stringify({ name: "Prism Mind Palace" }), { status: 200 }));
-    await expect(isLocalDashboardRunning("http://localhost:3012/?token=local-secret", fetcher)).resolves.toBe(true);
+  it("authenticates the listener without transmitting the dashboard capability or probe key", async () => {
+    const probeKey = generateDashboardProbeKey();
+    const fetcher = vi.fn(async (input: string | URL | Request) => {
+      const requested = new URL(String(input));
+      const nonce = requested.searchParams.get("nonce") || "";
+      return new Response(JSON.stringify({
+        name: "Prism Mind Palace",
+        nonce,
+        proof: createDashboardProbeResponse(probeKey, nonce),
+      }), { status: 200 });
+    });
+    await expect(
+      isLocalDashboardRunning("http://localhost:3012/?token=local-secret", probeKey, fetcher),
+    ).resolves.toBe(true);
     const requested = new URL(String(fetcher.mock.calls[0][0]));
-    expect(requested.href).toBe("http://localhost:3012/manifest.json");
-    expect(requested.search).toBe("");
+    expect(requested.pathname).toBe("/api/dashboard/probe");
+    expect(requested.search).not.toContain("local-secret");
+    expect(requested.search).not.toContain(probeKey);
+    expect(requested.searchParams.get("nonce")).toMatch(/^[a-f0-9]{64}$/);
+    expect(requested.searchParams.get("proof")).toMatch(/^[a-f0-9]{64}$/);
   });
 
-  it("rejects a foreign listener on the recorded port", async () => {
-    const fetcher = vi.fn(async () => new Response(JSON.stringify({ name: "Other App" }), { status: 200 }));
-    await expect(isLocalDashboardRunning("http://localhost:3012/?token=local-secret", fetcher)).resolves.toBe(false);
+  it("rejects a foreign listener that copies the exact Prism identity and reflects the request proof", async () => {
+    const probeKey = generateDashboardProbeKey();
+    const fetcher = vi.fn(async (input: string | URL | Request) => {
+      const requested = new URL(String(input));
+      return new Response(JSON.stringify({
+        name: "Prism Mind Palace",
+        nonce: requested.searchParams.get("nonce"),
+        proof: requested.searchParams.get("proof"),
+      }), { status: 200 });
+    });
+    await expect(
+      isLocalDashboardRunning("http://localhost:3012/?token=local-secret", probeKey, fetcher),
+    ).resolves.toBe(false);
   });
 
   it("rejects a manifest probe that redirects to another local listener", async () => {
@@ -132,7 +162,10 @@ describe("accountless local dashboard access", () => {
     if (!redirectAddress || typeof redirectAddress === "string") throw new Error("Missing redirect port");
 
     await expect(
-      isLocalDashboardRunning(`http://127.0.0.1:${redirectAddress.port}/?token=local-secret`),
+      isLocalDashboardRunning(
+        `http://127.0.0.1:${redirectAddress.port}/?token=local-secret`,
+        generateDashboardProbeKey(),
+      ),
     ).resolves.toBe(false);
   });
 });

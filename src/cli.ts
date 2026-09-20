@@ -39,7 +39,7 @@ import { verifyBehaviorHandler } from './tools/behavioralVerifierHandler.js';
 import {
   isLocalDashboardRunning,
   openDashboardUrl,
-  readDashboardAccessUrl,
+  readDashboardAccessState,
 } from './dashboard/dashboardAccess.js';
 
 const program = new Command();
@@ -161,8 +161,8 @@ program
   .option('--print', 'Print the current local dashboard link instead of opening a browser')
   .action(async (options: { print?: boolean }) => {
     try {
-      const url = readDashboardAccessUrl();
-      if (!(await isLocalDashboardRunning(url))) {
+      const { url, probeKey } = readDashboardAccessState();
+      if (!(await isLocalDashboardRunning(url, probeKey))) {
         throw new Error('The recorded Prism dashboard is not running. Restart your connected MCP host first.');
       }
       if (options.print) {

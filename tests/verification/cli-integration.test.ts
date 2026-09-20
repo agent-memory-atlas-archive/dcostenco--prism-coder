@@ -241,6 +241,9 @@ describe('CLI Integration — accountless Prism Free dashboard', { timeout: 30_0
     const unauthenticatedApi = await fetch(`http://127.0.0.1:${port}/api/account`);
     expect(unauthenticatedApi.status).toBe(401);
 
+    const unauthenticatedProbe = await fetch(`http://127.0.0.1:${port}/api/dashboard/probe`);
+    expect(unauthenticatedProbe.status).toBe(401);
+
     const { stdout } = await execFile(process.execPath, [cliPath, 'dashboard', '--print'], {
       cwd: path.resolve(__dirname, '../..'),
       env: dashboardEnv,

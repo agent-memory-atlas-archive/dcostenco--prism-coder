@@ -4,6 +4,7 @@ import {
   closeSync,
   constants as fsConstants,
   fchmodSync,
+  fstatSync,
   lstatSync,
   mkdirSync,
   openSync,
@@ -15,9 +16,21 @@ import {
 import { randomBytes } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import {
+  createDashboardProbeRequest,
+  DASHBOARD_PROBE_PATH,
+  generateDashboardProbeKey,
+  validateDashboardProbeKey,
+  verifyDashboardProbeResponse,
+} from "./dashboardProbe.js";
 
 const DASHBOARD_URL_FILE = "dashboard.url";
 const MAX_DASHBOARD_URL_BYTES = 4096;
+
+export interface DashboardAccessState {
+  url: string;
+  probeKey: string;
+}
 
 export function dashboardAccessUrlPath(home = homedir()): string {
   return join(home, ".prism-mcp", DASHBOARD_URL_FILE);
@@ -75,8 +88,13 @@ function validateDashboardUrl(raw: string): string {
  * boundary against another process running as the same OS user: that process
  * can already read or replace owner-only Prism state.
  */
-export function writeDashboardAccessUrl(url: string, home = homedir()): string {
+export function writeDashboardAccessUrl(
+  url: string,
+  home = homedir(),
+  probeKey = generateDashboardProbeKey(),
+): string {
   const validated = validateDashboardUrl(url);
+  const validatedProbeKey = validateDashboardProbeKey(probeKey);
   const directory = dashboardAccessDirectory(home);
   const filePath = dashboardAccessUrlPath(home);
 
@@ -104,7 +122,7 @@ export function writeDashboardAccessUrl(url: string, home = homedir()): string {
   let tempExists = true;
   try {
     if (process.platform !== "win32") fchmodSync(fd, 0o600);
-    writeFileSync(fd, `${validated}\n`, "utf8");
+    writeFileSync(fd, `${JSON.stringify({ version: 1, url: validated, probe_key: validatedProbeKey })}\n`, "utf8");
   } finally {
     closeSync(fd);
   }
@@ -120,33 +138,71 @@ export function writeDashboardAccessUrl(url: string, home = homedir()): string {
   return filePath;
 }
 
-export function readDashboardAccessUrl(home = homedir()): string {
+export function readDashboardAccessState(home = homedir()): DashboardAccessState {
   dashboardAccessDirectory(home);
   const filePath = dashboardAccessUrlPath(home);
-  let stat;
+  const noFollow = process.platform === "win32" ? 0 : fsConstants.O_NOFOLLOW;
+  let fd: number;
   try {
-    stat = lstatSync(filePath);
+    fd = openSync(filePath, fsConstants.O_RDONLY | noFollow);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") {
       throw new Error("No current local dashboard link. Restart your connected MCP host first.");
     }
+    if (code === "ELOOP") throw new Error("Local dashboard link path is not a regular file");
     throw error;
   }
-  if (!stat.isFile() || stat.isSymbolicLink()) {
-    throw new Error("Local dashboard link path is not a regular file");
+  try {
+    // Validate and read the same opened object. A path-level lstat followed by
+    // readFileSync(path) permits the directory entry to be swapped between the
+    // check and use; O_NOFOLLOW plus fstat/read on this descriptor closes that
+    // race on POSIX without broadening the same-OS-user trust boundary.
+    const stat = fstatSync(fd);
+    if (!stat.isFile()) throw new Error("Local dashboard link path is not a regular file");
+    if (process.platform !== "win32" && (stat.mode & 0o077) !== 0) {
+      throw new Error("Local dashboard link file permissions are unsafe");
+    }
+    const raw = readFileSync(fd, "utf8");
+    if (!raw || Buffer.byteLength(raw, "utf8") > MAX_DASHBOARD_URL_BYTES) {
+      throw new Error("Local dashboard link is missing or invalid");
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      throw new Error("Local dashboard link is invalid");
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error("Local dashboard link is invalid");
+    }
+    const state = parsed as { version?: unknown; url?: unknown; probe_key?: unknown };
+    if (state.version !== 1 || typeof state.url !== "string" || typeof state.probe_key !== "string") {
+      throw new Error("Local dashboard link is invalid");
+    }
+    return {
+      url: validateDashboardUrl(state.url),
+      probeKey: validateDashboardProbeKey(state.probe_key),
+    };
+  } finally {
+    closeSync(fd);
   }
-  if (process.platform !== "win32" && (stat.mode & 0o077) !== 0) {
-    throw new Error("Local dashboard link file permissions are unsafe");
-  }
-  return validateDashboardUrl(readFileSync(filePath, "utf8"));
+}
+
+export function readDashboardAccessUrl(home = homedir()): string {
+  return readDashboardAccessState(home).url;
 }
 
 export async function isLocalDashboardRunning(
   dashboardUrl: string,
+  probeKey: string,
   fetcher: typeof fetch = fetch,
 ): Promise<boolean> {
   const validated = validateDashboardUrl(dashboardUrl);
-  const probe = new URL("/manifest.json", validated);
+  const challenge = createDashboardProbeRequest(probeKey);
+  const probe = new URL(DASHBOARD_PROBE_PATH, validated);
+  probe.searchParams.set("nonce", challenge.nonce);
+  probe.searchParams.set("proof", challenge.proof);
   try {
     const response = await fetcher(probe, {
       redirect: "error",
@@ -154,11 +210,14 @@ export async function isLocalDashboardRunning(
     });
     if (!response.ok) return false;
     const finalUrl = response.url ? new URL(response.url) : probe;
-    if (finalUrl.origin !== probe.origin || finalUrl.pathname !== probe.pathname || finalUrl.search) {
+    if (finalUrl.href !== probe.href) {
       return false;
     }
-    const body = await response.json() as { name?: string };
-    return body.name === "Prism Mind Palace";
+    const body = await response.json() as { name?: string; nonce?: string; proof?: string };
+    return body.name === "Prism Mind Palace" &&
+      body.nonce === challenge.nonce &&
+      typeof body.proof === "string" &&
+      verifyDashboardProbeResponse(probeKey, challenge.nonce, body.proof);
   } catch {
     return false;
   }

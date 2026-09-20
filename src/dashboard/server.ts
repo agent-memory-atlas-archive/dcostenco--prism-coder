@@ -29,6 +29,12 @@ import { readDashboardLedger } from "./ledgerReader.js";
 import { PRISM_USER_ID, SERVER_CONFIG } from "../config.js";
 import { renderDashboardHTML, renderDashboardLocalOpenHTML } from "./ui.js";
 import { writeDashboardAccessUrl } from "./dashboardAccess.js";
+import {
+  createDashboardProbeResponse,
+  DASHBOARD_PROBE_PATH,
+  generateDashboardProbeKey,
+  verifyDashboardProbeRequest,
+} from "./dashboardProbe.js";
 import { computeIntentHealth } from "./intentHealth.js";
 import { getAllSettings, setSetting, getSetting, getSettingSync } from "../storage/configStorage.js";
 import { compactLedgerHandler } from "../tools/compactionHandler.js";
@@ -133,6 +139,7 @@ export async function startDashboardServer(): Promise<void> {
     pinnedToken: process.env.PRISM_DASHBOARD_TOKEN,
     optOut: process.env.PRISM_DASHBOARD_NO_TOKEN,
   });
+  const DASHBOARD_PROBE_KEY = generateDashboardProbeKey();
   const COOKIE_SECURE =
     !!process.env.PRISM_DASHBOARD_ORIGIN?.startsWith("https://") || !!process.env.PRISM_DASHBOARD_SECURE;
 
@@ -269,6 +276,25 @@ return false;}
 
     // ─── v5.1: Auth login endpoint (always accessible) ───
     const reqUrl = new URL(req.url || "/", `http://${req.headers.host}`);
+
+    // Authenticate the recorded listener before the CLI opens a browser. The
+    // request and response use domain-separated HMACs over a fresh nonce, so a
+    // foreign process that copied the public manifest cannot impersonate this
+    // dashboard or learn the local dashboard capability from the probe.
+    if (req.method === "GET" && reqUrl.pathname === DASHBOARD_PROBE_PATH) {
+      const nonce = reqUrl.searchParams.get("nonce") || "";
+      const requestProof = reqUrl.searchParams.get("proof") || "";
+      if (!verifyDashboardProbeRequest(DASHBOARD_PROBE_KEY, nonce, requestProof)) {
+        res.writeHead(401, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+        return res.end(JSON.stringify({ error: "Invalid dashboard probe" }));
+      }
+      res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+      return res.end(JSON.stringify({
+        name: "Prism Mind Palace",
+        nonce,
+        proof: createDashboardProbeResponse(DASHBOARD_PROBE_KEY, nonce),
+      }));
+    }
 
     // ─── SECURITY: dashboard token gate (GHSA-9cvx-7x8q-3g6m, remediation #2) ───
     // Second layer beneath the Host guard. Inert when DASHBOARD_TOKEN is null
@@ -1576,7 +1602,7 @@ self.addEventListener('message', (e) => {
     // Non-fatal — just means the user has to know the port
   }
   try {
-    writeDashboardAccessUrl(dashboardUrl);
+    writeDashboardAccessUrl(dashboardUrl, os.homedir(), DASHBOARD_PROBE_KEY);
   } catch (error) {
     console.error(`[Dashboard] Could not save local opener link: ${error instanceof Error ? error.message : String(error)}`);
   }
