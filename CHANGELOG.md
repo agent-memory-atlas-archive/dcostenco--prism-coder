@@ -2,6 +2,32 @@
 
 All notable changes to this project will be documented in this file.
 
+## 20.21.14 — 2026-09-23
+
+### Tasks that say they need host tools stay with the host
+
+`session_task_route` sent some tasks to the local worker even when the task
+description said outright that it needed host tools or reserved judgment
+("Needs host tools to inspect…", "requiring host filesystem tools",
+"Reserved security judgment: …"). The local worker cannot run tools, so those
+delegations came back refused, rejected, or redone by the host. The router now
+treats any mention of such a requirement as a hard host boundary, negated or
+not: a wrong host route costs one host turn, a wrong local route a wasted
+delegation. On two months of real routes, reading negation changed nothing.
+
+### A pasted skill list no longer loads unrelated skills
+
+Prompt routing already ignored skill names pasted into a prompt, but only the
+names it could route. Protected skill names were not stripped, and one of them
+contains a trigger word for a different skill, so pasting Prism's startup
+output could load that skill into an unrelated question. Protected names are
+now stripped too. Stripping replaces each ASCII letter with q/Q and each
+digit with 0, keeping its kind but not its identity; other characters are
+left as they are. A trigger that can tell one letter or digit
+from another (a word, a range such as [n-s], or a backreference) may match a
+stripped name differently; a trigger that cannot matches exactly as it does
+on the raw text.
+
 ## 20.21.13 — 2026-09-20
 
 ### Paid plans are discoverable and actionable in the dashboard

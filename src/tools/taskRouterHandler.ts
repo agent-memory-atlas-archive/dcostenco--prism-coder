@@ -136,6 +136,37 @@ const HOST_TOOL_ACTION_GROUPS = [
   },
 ] as const;
 
+/**
+ * Requirements the host states about its own task. Hosts write the task
+ * description, and many say outright that the work needs host tools or
+ * reserved judgment ("Needs host tools to inspect…", "Reserved security
+ * judgment: …"). The local worker cannot run tools, so these are hard host
+ * boundaries. The tool pattern must start at host/repository/repo/filesystem so
+ * "open-source tools" does not count.
+ *
+ * Any occurrence counts — negated, contrasted, or merely mentioned. Reading
+ * English negation with patterns kept misrouting ("do not skip host tools",
+ * "no host tools should be omitted"), and the costs are lopsided: a wrong
+ * host route costs one host turn, a wrong claw route a delegation that comes
+ * back refused or rejected. On two months of real routes, ignoring negation
+ * changed no decision.
+ */
+// Modifier chains are bounded ({0,3}): an unbounded chain restarted at every
+// "repository" and made a near-miss input quadratic. Modifiers and "reserved
+// … judgment" qualifiers are the closed sets seen in two months of real task
+// descriptions, so prose like "she reserved her judgment" does not match, and
+// "and" counts only before another modifier ("host git and shell tools", not
+// "the host and tools").
+const SELF_DECLARED_HOST_REQUIREMENTS = [
+  /\b(?:host|repository|repo|filesystem)(?:[- /](?:and[- ])?(?:side|repository|filesystem|file|source|shell|git|browser|test|web|docker|documentation|ci|process|external|deployment)){0,3}[- ]tools?\b/i,
+  /\breserved(?:[- /](?:adversarial|security|compliance|release|review|clinical|product|host|auth|phi|safety|tenant|lifecycle|isolation)){0,3}[- ]judge?ment\b/i,
+  /\b(?:security|compliance|tenant[- ]isolation)[- ]judge?ment\b/i,
+];
+
+function hasSelfDeclaredHostRequirement(description: string): boolean {
+  return SELF_DECLARED_HOST_REQUIREMENTS.some((pattern) => pattern.test(description));
+}
+
 /** Complexity signals that should select 27B when the task is bounded. */
 const HIGH_COMPLEXITY_KEYWORDS = [
   "complex logic", "algorithm", "dynamic programming", "constraint solver",
@@ -230,6 +261,7 @@ function assessDelegability(args: SessionTaskRouteArgs): DelegabilityAssessment 
   const reasons: string[] = [];
   if (boundaryKeywordHits > 0) reasons.push("reserved host judgment");
   if (toolWorkflowHits > 0) reasons.push("host tools or external state required");
+  if (hasSelfDeclaredHostRequirement(description)) reasons.push("host requirement stated in the task");
   if (toolActionGroups.length >= HOST_TOOL_ACTION_GROUP_THRESHOLD) {
     reasons.push(`host workflow actions: ${toolActionGroups.join(", ")}`);
   }
@@ -425,13 +457,19 @@ export function computeRoute(args: SessionTaskRouteArgs): TaskRouteResult {
 
   // ── Cold-start / edge case: insufficient input ──
   if (!task_description || task_description.trim().length < 10) {
+    // A stated host requirement is a hard boundary on this path too: the
+    // handler's experience bias and local tie-break both gate on the flag.
+    const hostRequirement = hasSelfDeclaredHostRequirement(task_description ?? "");
     return {
       target: "host",
-      confidence: 0.5,
+      confidence: hostRequirement ? HARD_HOST_BOUNDARY_CONFIDENCE : 0.5,
       needs_history: false,
       complexity_score: 5,
-      rationale: "Insufficient information for confident routing. Defaulting to host model.",
+      rationale: hostRequirement
+        ? "Host boundary: host requirement stated in the task."
+        : "Insufficient information for confident routing. Defaulting to host model.",
       recommended_tool: null,
+      ...(hostRequirement ? { _hardHostBoundary: true } : {}),
     };
   }
 

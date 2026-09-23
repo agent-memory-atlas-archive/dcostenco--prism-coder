@@ -308,6 +308,135 @@ describe("computeRoute routing logic", () => {
   });
 });
 
+// ─── Self-declared host requirements ─────────────────────────
+// Hosts write the task description, and they often say outright that the
+// work needs host tools or reserved judgment. Replayed over two months of
+// real routes, 16 of 69 claw routes said exactly that; the local worker cannot
+// run tools, and every one whose outcome was logged came back refused,
+// rejected, or redone by the host. These are paraphrases of those descriptions.
+describe("computeRoute self-declared host requirements", () => {
+  it.each([
+    {
+      label: "needs host tools",
+      task_description: "Independent accessibility and navigation-state review for a shared sidebar change. Needs host tools to inspect app-shell tests and focus management.",
+      estimated_scope: "minor_edit" as const,
+    },
+    {
+      label: "bounded but requiring host tools",
+      task_description: "Bounded independent adversarial review requiring host tools to inspect the exact current worktree source.",
+      estimated_scope: "minor_edit" as const,
+    },
+    {
+      label: "host filesystem tools",
+      task_description: "Inspect the duration recovery implementation with host filesystem tools; identify the exact state and persistence path.",
+      estimated_scope: "minor_edit" as const,
+    },
+    {
+      label: "repository tools",
+      task_description: "Read-only visual-system pass requiring repository tools: identify the actual current component references.",
+      estimated_scope: "minor_edit" as const,
+    },
+    {
+      label: "reserved security judgment",
+      task_description: "Reserved security judgment: adversarial read-only pass over the refund idempotency path.",
+      estimated_scope: "minor_edit" as const,
+    },
+  ])("routes '$label' to the host", (args) => {
+    const result = computeRoute(args);
+
+    expect(result.target).toBe("host");
+    expect(result._hardHostBoundary).toBe(true);
+    expect(result.recommended_tool).toBeNull();
+  });
+
+  // Any occurrence of a requirement phrase routes to the host — negated,
+  // double-negated, contrasted, or merely mentioned. Reading English negation
+  // with patterns did not converge across three review rounds, and the costs
+  // are lopsided: a wrong host route costs one host turn, a wrong claw route a
+  // delegation that comes back refused or rejected. On two months of real
+  // routes, dropping negation handling changed no decision.
+  it.each([
+    "Draft a reminder checklist from the notes below; this needs no host tools and no security judgment.",
+    "Summarize the pasted notes without any host tools.",
+    "No host tools should be omitted for this simple summary.",
+    "Host tools are not required for this bounded summary.",
+    "Do not skip host tools for this simple bounded summary.",
+    "Host tools are not required for drafting, but are required for source inspection.",
+    "This needs not only host tools but also security judgment.",
+    "This is not a mechanical edit and requires tenant-isolation judgment.",
+    "Requires reserved security judgment, not a routine mechanical edit.",
+    "Write a short glossary entry explaining what host tools means.",
+  ])("routes %s to the host", (task_description) => {
+    const result = computeRoute({ task_description, estimated_scope: "minor_edit" });
+
+    expect(result._hardHostBoundary).toBe(true);
+    expect(result.target).toBe("host");
+  });
+
+  it("does not read 'host and tools' as a tool requirement", () => {
+    const result = computeRoute({
+      task_description: "Compare the host and tools used by this simple parser.",
+      estimated_scope: "minor_edit",
+    });
+
+    expect(result._hardHostBoundary).toBe(false);
+  });
+
+  it("marks the boundary on the short-input path too", () => {
+    // Review round 5: inputs under 10 characters returned before the rule
+    // ran, leaving _hardHostBoundary unset, so experience bias or the local
+    // tie-break (both gate on that flag) could still flip them to claw.
+    for (const task_description of ["host tool", "repo tool"]) {
+      const result = computeRoute({ task_description });
+      expect(result.target).toBe("host");
+      expect(result._hardHostBoundary).toBe(true);
+      expect(result.confidence).toBeGreaterThanOrEqual(0.95);
+      expect(result.rationale).toContain("host requirement stated in the task");
+    }
+    expect(computeRoute({ task_description: "fix typo" })._hardHostBoundary).toBeUndefined();
+  });
+
+  it("does not read ordinary prose about reserving judgment as a requirement", () => {
+    const result = computeRoute({
+      task_description: "Write a simple summary of the sentence: She reserved her judgment until Friday.",
+      estimated_scope: "minor_edit",
+    });
+
+    expect(result._hardHostBoundary).toBe(false);
+  });
+
+  it("stays linear on a near-miss modifier chain", () => {
+    // Review round 4: an unbounded modifier chain restarted at every
+    // "repository", so this input grew quadratically (460 ms at 176k chars).
+    const nearMiss = "repository-".repeat(40_000) + "not-a-tool";
+    const t0 = performance.now();
+    const result = computeRoute({ task_description: nearMiss });
+    expect(performance.now() - t0).toBeLessThan(1_000);
+    expect(result._hardHostBoundary).toBe(false);
+  });
+
+  it("stays linear on a long description", () => {
+    // An earlier version rescanned the whole prefix for every match (945 ms at
+    // 110k characters in review). noMatch forces a scan of the entire input.
+    const noMatch = "open-source tools and browser tools; ".repeat(6_000);
+    const t0 = performance.now();
+    const clean = computeRoute({ task_description: noMatch });
+    const late = computeRoute({ task_description: noMatch + "then requires host tools." });
+    expect(performance.now() - t0).toBeLessThan(1_000);
+    expect(clean._hardHostBoundary).toBe(false);
+    expect(late._hardHostBoundary).toBe(true);
+  });
+
+  it("leaves an ordinary bounded task alone", () => {
+    const result = computeRoute({
+      task_description: "Write a JSDoc comment for a function that debounces a callback",
+      estimated_scope: "minor_edit",
+    });
+
+    expect(result._hardHostBoundary).toBe(false);
+  });
+});
+
 // ─── Cold Start & Edge Cases ─────────────────────────────────
 
 describe("computeRoute edge cases", () => {

@@ -382,7 +382,8 @@ export function stripQuotedEvidenceForRouting(
   // text (adversarial review, confirmed with a repro). Line-anchoring means
   // eating text now requires two line-start fences — which IS a fenced block.
   //
-  // Replacement must sever BOTH proximity-window classes in the real table:
+  // A removed FENCED BLOCK must sever BOTH proximity-window classes in the
+  // real table:
   //   - `.{0,N}` windows: `.` does not cross \n (no pattern uses the s-flag),
   //     so a newline severs them.
   //   - `\s*`/`\s+`-glued windows (34 of 58 live patterns, e.g.
@@ -392,7 +393,30 @@ export function stripQuotedEvidenceForRouting(
   //     includes \x1F (unit separator): non-space (blocks \s runs), non-word
   //     (leaves \b semantics as a space would), and severed from dot-windows
   //     by the flanking newlines.
+  // A removed skill NAME is replaced differently — see neutralize below.
   const SEVER = '\n\x1f\n';
+  // A stripped name keeps its length and each character's kind: ASCII
+  // lowercase letters become "q", ASCII uppercase "Q", ASCII digits "0", and
+  // every other character (separators, non-ASCII letters) stays as it was. \b, \w, \d, \s, ., [a-z] and the like read the same at every
+  // position as on the raw text, so a trigger stops matching only if it needs
+  // the identity of the name's letters — which is what stripping exists to remove.
+  // Earlier masks leaked: a line break cut "Draft an ABA <name> plan" apart
+  // (review round 1), a non-word \x1F run cut [-\w] windows (round 3), and
+  // "_" cut [ a-z-] windows (round 4).
+  // Known limitation, stated as a class: the mask keeps each ASCII letter's
+  // and digit's kind but not its identity. A trigger that can tell one letter (or one
+  // digit) from another — a word, a letter range such as [n-s], the mask
+  // letters themselves, or a backreference such as (\w)\1 — may match a
+  // stripped name differently, in either direction. A trigger that cannot
+  // tell them apart matches exactly as on the raw text. No mask smaller than
+  // the alphabet avoids this; triggers come from the routing table and
+  // account owners, so it is disclosed and pinned in tests, not defended.
+  // Also disclosed: a name glued to a following letter or digit other than
+  // a plural "s" ("…-protocol7") is not recognized as the name, so its
+  // trigger words still route; the segment anchor below is what keeps
+  // "fix-ci" from firing inside "prefix-ci".
+  const neutralize = (name: string): string =>
+    name.replace(/[a-z]/g, 'q').replace(/[A-Z]/g, 'Q').replace(/[0-9]/g, '0');
   let out = prompt
     .replace(/^[ \t]*```[^\n]*\n[\s\S]*?\n[ \t]*```[ \t]*$/gm, SEVER)
     .replace(/^[ \t]*~~~[^\n]*\n[\s\S]*?\n[ \t]*~~~[ \t]*$/gm, SEVER);
@@ -418,8 +442,19 @@ export function stripQuotedEvidenceForRouting(
     if (!Array.isArray(list)) continue;
     for (const n of list) if (typeof n === "string") names.add(n);
   }
-  // Longest first, so a name that contains another is removed whole.
-  for (const name of [...names].sort((a, b) => b.length - a.length)) {
+  // Protected skills are never prompt-routed, so the table above does not name
+  // them, but every pasted startup log lists them and a protected name can
+  // carry another skill's trigger word: "aba-precision-protocol" satisfied the
+  // clinical \baba\b trigger. They are exact names, not English.
+  for (const n of REQUIRED_PROTECTED_SKILL_NAMES) names.add(n);
+  // Every name is matched against the SAME unmasked text and the union of
+  // the spans is masked once below. Masking name by name let a longer name
+  // consume the head of an overlapping one, which then no longer matched and
+  // left its tail — and its trigger words — unmasked (new review, cycle 1).
+  // A contained name is covered by the union, so order does not matter.
+  const source = out;
+  const masked = new Uint8Array(source.length);
+  for (const name of names) {
     // Bounds mirror the routing table's own name policy (≤128 chars). An
     // overlong or hostile name from a poisoned table must degrade to
     // "not stripped", never to a thrown SyntaxError that kills routing for
@@ -449,10 +484,22 @@ export function stripQuotedEvidenceForRouting(
     if (!/[-_]/.test(name)) continue;
     try {
       const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      out = out.replace(new RegExp(`(?<![A-Za-z0-9])${escaped}(?![A-Za-z0-9])`, 'gi'), SEVER);
+      const re = new RegExp(`(?<![A-Za-z0-9])${escaped}s?(?![A-Za-z0-9])`, 'gi');
+      // exec, restarting one unit after each match START, so an occurrence
+      // that overlaps an earlier one of the same name ("aba-aba" twice in
+      // "aba-aba-aba") is found too; matchAll skips it. lastIndex strictly
+      // increases, so this stays linear for a bounded name length.
+      for (let m = re.exec(source); m; m = re.exec(source)) {
+        masked.fill(1, m.index, m.index + m[0].length);
+        re.lastIndex = m.index + 1;
+      }
     } catch { /* skip unbuildable names — same policy as the matcher */ }
   }
-  return out;
+  if (!masked.includes(1)) return source;
+  // split('') indexes UTF-16 code units, the same units matchAll reports.
+  const units = source.split('');
+  for (let i = 0; i < units.length; i++) if (masked[i]) units[i] = neutralize(units[i]);
+  return units.join('');
 }
 
 /**

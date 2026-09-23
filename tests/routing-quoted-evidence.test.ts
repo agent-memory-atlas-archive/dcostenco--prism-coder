@@ -59,7 +59,8 @@ describe('pasted evidence does not activate skills', () => {
     // are >20 chars apart, so \bacme\b.{0,20}\b(billing|invoice)\b does NOT
     // match the raw text. Replacing the name with a SPACE brought them within
     // the window and CREATED a match (adversarial review, reproduced). The
-    // newline replacement severs the window instead: still no match.
+    // name is now masked in place at its full length, so the distance stays
+    // above 20 characters: still no match.
     const LONG = 'acme-xyz-billing-extra-longer';
     const triggers = { ...TRIGGERS, ['\\bacme\\b.{0,20}\\b(billing|invoice)\\b']: ['acme-xyz-billing'] };
     const prompt = `acme ${LONG} invoice`;
@@ -124,11 +125,11 @@ describe('real symptoms still route — the regression risk of the fix', () => {
 });
 
 describe('round-2 review regressions', () => {
-  it('\\s-glued windows are severed too — the real-table bridging repro', () => {
+  it('\\s-glued windows cannot span a stripped name — the real-table bridging repro', () => {
     // 34/58 live patterns glue words with \s* (e.g. \bui\s*test\b). \n IS \s,
     // so the round-1 newline replacement did NOT sever them: stripping a name
-    // from 'ui <name> test' routed xcuitest-ios-watch. The \x1F in the
-    // separator is non-space, so \s runs cannot span it.
+    // from 'ui <name> test' routed xcuitest-ios-watch. The name is now masked
+    // in place with non-space letters, so \s runs cannot span it.
     const t: Record<string, string[]> = {
       '\\bui\\s*test\\b': ['xcuitest-ios-watch'],
       zz: ['gh-fix-ci'],
@@ -315,5 +316,150 @@ describe('WIRING — the real routing entry point, not just the helper', () => {
     const names = await resolvePromptSkillNames(
       'I need to submit the acme billing invoice', undefined, TRIGGERS);
     expect(names).toContain('acme-xyz-billing');
+  });
+});
+
+/**
+ * Protected skills are never prompt-routed, so the strip above never knew
+ * their names — yet every pasted startup log lists them, and a protected name
+ * can carry ANOTHER skill's trigger word. Real false fire: the clinical
+ * trigger `\baba\b` matched inside "aba-precision-protocol" in a pasted
+ * "Core/protected skills provisioned" line.
+ */
+describe('pasted protected skill names do not activate other skills', () => {
+  const CLINICAL: Record<string, string[]> = { '\\b(?<!data)aba\\b': ['clinical-assistant'] };
+  const routeClinical = (prompt: string): string[] =>
+    _applyPromptRouting([], stripQuotedEvidenceForRouting(prompt, CLINICAL), CLINICAL).map((s) => s.name);
+
+  it('a pasted protected-skill list routes nothing', () => {
+    const pasted = 'why is startup slow?\nCore/protected skills provisioned: prime-directive, aba-precision-protocol, evidence-first-protocol';
+    expect(routeClinical(pasted)).toEqual([]);
+  });
+
+  it('typed clinical text still routes', () => {
+    expect(routeClinical('Draft an ABA behavior plan for elopement')).toEqual(['clinical-assistant']);
+  });
+
+  it('a trigger formed by typed words on both sides of a name still routes', () => {
+    // Adversarial review, round 1: replacing the name with a line break cut
+    // this proximity window even though both words were typed by the user.
+    const window: Record<string, string[]> = { '\\baba\\b.{0,40}\\bplan\\b': ['clinical-assistant'] };
+    const names = _applyPromptRouting(
+      [], stripQuotedEvidenceForRouting('Draft an ABA evidence-first-protocol plan for elopement', window), window,
+    ).map((s) => s.name);
+    expect(names).toEqual(['clinical-assistant']);
+  });
+
+  it('hyphenated clinical English that is not a skill name still routes', () => {
+    expect(routeClinical('Suggest ABA-based strategies for transitions')).toEqual(['clinical-assistant']);
+  });
+});
+
+describe('stripped names keep each character\'s regex class', () => {
+  it('a word-class window across a protected name still matches (review round 3)', () => {
+    // \x1F is not a word character, so replacing a name with it cut [-\w]
+    // windows that the raw text satisfied. The mask now keeps each
+    // character's kind (letters -> q/Q, digits -> 0, separators unchanged),
+    // so \b, \w and . read the same at every position.
+    const t: Record<string, string[]> = { '\\bfoo\\b[-\\w]{0,30}\\bbar\\b': ['outside-skill'] };
+    const names = _applyPromptRouting(
+      [], stripQuotedEvidenceForRouting('foo-aba-precision-protocol-bar', t), t,
+    ).map((s) => s.name);
+    expect(names).toEqual(['outside-skill']);
+  });
+});
+
+describe('stripped names keep each character\'s kind', () => {
+  it('a letter-class window across a protected name still matches (review round 4)', () => {
+    // "_" is outside [a-z], so an underscore mask cut this window. Letters now
+    // become "q"/"Q" and digits "0": only a trigger that needs the name's
+    // actual letters stops matching.
+    const t: Record<string, string[]> = { '\\bfoo\\b[ a-z-]{0,40}\\bbar\\b': ['outside-skill'] };
+    const names = _applyPromptRouting(
+      [], stripQuotedEvidenceForRouting('foo aba-precision-protocol bar', t), t,
+    ).map((s) => s.name);
+    expect(names).toEqual(['outside-skill']);
+  });
+});
+
+describe('documented limitation: a trigger that can tell letters apart can see the mask', () => {
+  it('a trigger written against the mask literal is not protected (review round 5)', () => {
+    // Any finite mask is visible to a regex that names it: \bqqqqq\b matches
+    // the masked "prime-directive", and (?!qqqqq) would be cut by it. Triggers
+    // are authored by the routing table and account owners, not by an
+    // adversary of their own routing, so this is disclosed, not defended.
+    // Pinned so that narrowing it later is a deliberate change.
+    const t: Record<string, string[]> = { '\\bqqqqq\\b': ['mask-watcher'] };
+    const names = _applyPromptRouting(
+      [], stripQuotedEvidenceForRouting('see prime-directive here', t), t,
+    ).map((s) => s.name);
+    expect(names).toEqual(['mask-watcher']);
+  });
+
+  it('a letter range containing q can match a masked name the raw text did not (Fable review)', () => {
+    // "precision" has letters outside [n-s]; its mask "qqqqqqqqq" does not.
+    // Pinned so that narrowing it later is a deliberate change.
+    const t: Record<string, string[]> = { '\\b[n-s]{9}\\b': ['range-watcher'] };
+    const raw = _applyPromptRouting([], 'note aba-precision-protocol here', t).map((s) => s.name);
+    const stripped = _applyPromptRouting(
+      [], stripQuotedEvidenceForRouting('note aba-precision-protocol here', t), t,
+    ).map((s) => s.name);
+    expect(raw).toEqual([]);
+    expect(stripped).toEqual(['range-watcher']);
+  });
+
+  it('a backreference can match a masked name the raw text did not (Fable review, cycle 2)', () => {
+    // "evidence" != "protocol" in the raw name; both are "qqqqqqqq" masked.
+    const t: Record<string, string[]> = { '\\b(\\w+)-\\w+-\\1\\b': ['backref-watcher'] };
+    const prompt = 'apply evidence-first-protocol now';
+    const raw = _applyPromptRouting([], prompt, t).map((s) => s.name);
+    const stripped = _applyPromptRouting([], stripQuotedEvidenceForRouting(prompt, t), t).map((s) => s.name);
+    expect(raw).toEqual([]);
+    expect(stripped).toEqual(['backref-watcher']);
+  });
+});
+
+describe('a protected name with a suffix (Fable review, cycle 3)', () => {
+  const CLINICAL: Record<string, string[]> = { '\\baba\\b': ['clinical-assistant'] };
+  const routeClinical = (prompt: string): string[] =>
+    _applyPromptRouting([], stripQuotedEvidenceForRouting(prompt, CLINICAL), CLINICAL).map((s) => s.name);
+
+  it('a plural protected name is stripped too', () => {
+    expect(routeClinical('the aba-precision-protocols are loaded')).toEqual([]);
+  });
+
+  it('documented limitation: any other glued letter or digit hides the name', () => {
+    // A name glued to a following letter or digit (other than a plural "s")
+    // is not recognized as the name, so its trigger word still routes. The
+    // segment anchor exists so "fix-ci" never fires inside "prefix-ci".
+    // Pinned so that narrowing it later is a deliberate change.
+    expect(routeClinical('skills: aba-precision-protocol7')).toEqual(['clinical-assistant']);
+  });
+});
+
+describe('overlapping names are masked as one span (new review, cycle 1)', () => {
+  it('a longer name that overlaps a protected name cannot expose its tail', () => {
+    // Masking name by name let "quarterly-review-acme-aba" consume the head
+    // of "aba-precision-protocol", which then no longer matched, so its
+    // unmasked tail routed. Spans are now found on the unmasked text and
+    // masked once, as a union.
+    const t: Record<string, string[]> = {
+      zz: ['quarterly-review-acme-aba'],
+      '\\bprecision\\b': ['precision-tuner'],
+    };
+    const prompt = 'log line: quarterly-review-acme-aba-precision-protocol loaded';
+    const names = _applyPromptRouting([], stripQuotedEvidenceForRouting(prompt, t), t).map((s) => s.name);
+    expect(names).toEqual([]);
+  });
+});
+
+describe('a name that overlaps itself is fully masked (new review, cycle 2)', () => {
+  it('a later occurrence overlapping an earlier one of the same name is masked too', () => {
+    // matchAll finds only non-overlapping occurrences, so in "aba-aba-aba"
+    // the second "aba-aba" was never found and its tail routed.
+    const t: Record<string, string[]> = { zz: ['aba-aba'], '\\baba\\b': ['clinical-assistant'] };
+    const stripped = stripQuotedEvidenceForRouting('log: aba-aba-aba loaded', t);
+    expect(stripped).toBe('log: qqq-qqq-qqq loaded');
+    expect(_applyPromptRouting([], stripped, t).map((s) => s.name)).toEqual([]);
   });
 });
