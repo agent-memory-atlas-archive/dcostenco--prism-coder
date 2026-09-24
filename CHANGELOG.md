@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## 20.21.14 — 2026-09-23
+## 20.21.14 — 2026-09-24
 
 ### Tasks that say they need host tools stay with the host
 
@@ -27,6 +27,46 @@ left as they are. A trigger that can tell one letter or digit
 from another (a word, a range such as [n-s], or a backreference) may match a
 stripped name differently; a trigger that cannot matches exactly as it does
 on the raw text.
+
+### Notifications and agent reports no longer load skills
+
+Hosts deliver some turns to the prompt hook that no person wrote: background
+task notifications, reports from other agents, and continuation summaries.
+Prompt routing treated them like typed requests, so a word inside an agent's
+report ("Supabase", "screenshot", "unit test") loaded that skill in the middle
+of a task. In our own sessions, most hook skill loads came from these turns,
+and few of those loads helped the task. Such turns are now recognised by how
+they start and are not routed. The exception
+is a finished background command: its one-line summary, which names the
+command the agent chose to run, is still routed, but its output is not. The
+markers are matched only at the start, so a person who pastes a notification
+after their own words is routed as before. A message that begins with a
+pasted notification is not routed.
+
+### Routed skills name the routing table that chose them
+
+The routing table changes over time, and a transcript recorded which skills
+loaded but not which version of the table picked them, so a past load could
+not be judged against the rules that produced it. The routed-skills header
+from the prompt hook and `session_route_prompt`, and the symptom-triggered
+skills line from `session_bootstrap`, now end with the table's version, for
+example "Routing table v41.". The skills line itself is unchanged. No version
+is shown when no public table was available and only a skill's own triggers
+could match; when the hook re-injects skills after compaction or a skill
+update, which is not routing; or on skills that `session_load_context` adds to
+a project's context for the prompt, which carry no routed-skills header.
+
+### Skills with their own triggers load even when the file is formatted unusually
+
+A skill that declares its own `prompt_triggers` could be delivered and still
+never load, with no error, in two cases. If a line of its description ended in
+the text "prompt_triggers:", the parser started reading the trigger list there,
+met the real key on the next line, and stopped with nothing. If its SKILL.md
+was saved with Windows (CRLF) or old Mac (CR) line endings, the frontmatter
+never matched at all. Both skills now read exactly as the same file written
+plainly. A new end-to-end test runs such a skill through manifest sync, the
+local cache, routing and a fresh `prism route-prompt` process, and checks that
+it loads and that the injection names the routing table.
 
 ## 20.21.13 — 2026-09-20
 

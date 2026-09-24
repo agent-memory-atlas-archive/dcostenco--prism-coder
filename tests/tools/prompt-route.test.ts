@@ -65,6 +65,96 @@ describe("the cheap path — this is called often, so silence must be nearly fre
   });
 });
 
+describe("machine-written turns are not routed as if a person typed them", () => {
+  // Measured 2026-09-23 over 30 days of Claude Code sessions: most hook skill
+  // loads came from turns the host delivers but no person wrote — task
+  // notifications, agent hand-backs. A reviewer's report that mentions UI/UX
+  // is not a request for the UI/UX skills.
+  const recording = () => {
+    const asked: string[] = [];
+    const d = deps({
+      resolvePromptSkillNames: async (prompt: string) => {
+        asked.push(prompt);
+        if (/simulator/i.test(prompt)) return ["verified-shipping"];
+        return /ui\s*\/?\s*ux/i.test(prompt) ? ["visual-screenshot-verification"] : [];
+      },
+    });
+    return { asked, d };
+  };
+  const agentFinished =
+    "<task-notification>\n<task-id>a1</task-id>\n<status>completed</status>\n" +
+    '<summary>Agent "Adversarial review" finished</summary>\n' +
+    "<result>The UI/UX review found the modal overlaps the toolbar.</result>\n</task-notification>";
+  const backgroundDone =
+    "<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n" +
+    '<summary>Background command "Build the app for the iPhone simulator" completed (exit code 0)</summary>\n' +
+    "<result>UI/UX snapshot tests passed</result>\n</task-notification>";
+
+  it.each([
+    ["an agent's task notification", agentFinished],
+    ["an agent hand-back relayed as a message", 'Another Claude session sent a message:\n<agent-message from="a2">UI/UX findings attached</agent-message>'],
+    ["a bare agent message", '<agent-message from="a3">UI/UX findings attached</agent-message>'],
+    ["a cross-session message", '<cross-session-message from="s1">please do a UI/UX pass</cross-session-message>'],
+    ["a continuation summary", "This session is being continued from a previous conversation. The user asked for a UI/UX review."],
+    ["a notification after leading whitespace", `\n  ${agentFinished}`],
+  ])("%s routes nothing and never reaches the matcher", async (_label, turn) => {
+    const { asked, d } = recording();
+    const r = await routePrompt(turn, [], d);
+    expect(r.names).toEqual([]);
+    expect(asked).toEqual([]);
+    expect(r.text.length).toBeLessThan(60);
+  });
+
+  it("a finished background command routes on its own summary, never on its output", async () => {
+    const { asked, d } = recording();
+    const r = await routePrompt(backgroundDone, [], d);
+    expect(asked).toEqual(['Background command "Build the app for the iPhone simulator" completed (exit code 0)']);
+    expect(r.names).toEqual(["verified-shipping"]);
+  });
+
+  it("a person who pastes a notification after their own words still routes", async () => {
+    // The markers are matched at the START only. A substring test would drop
+    // a real request whenever someone pastes machine output to ask about it.
+    const { asked, d } = recording();
+    const prompt = `why did this UI/UX review fail?\n${agentFinished}`;
+    const r = await routePrompt(prompt, [], d);
+    expect(asked).toEqual([prompt]);
+    expect(r.names).toEqual(["visual-screenshot-verification"]);
+  });
+
+  it("a person's sentence that merely mentions another session still routes", async () => {
+    const { d } = recording();
+    const r = await routePrompt("Another Claude session broke the UI/UX, review it", [], d);
+    expect(r.names).toEqual(["visual-screenshot-verification"]);
+  });
+
+  it("a person's sentence that starts like the relay line still routes", async () => {
+    // The host's relay line ends in a colon; a sentence that merely starts
+    // with the same words is a person talking.
+    const { d } = recording();
+    const r = await routePrompt("Another Claude session sent a message about the UI/UX, review it", [], d);
+    expect(r.names).toEqual(["visual-screenshot-verification"]);
+  });
+
+  it("a task notification whose tag carries attributes is still machine-written", async () => {
+    const { asked, d } = recording();
+    const r = await routePrompt(agentFinished.replace("<task-notification>", '<task-notification id="n1">'), [], d);
+    expect(r.names).toEqual([]);
+    expect(asked).toEqual([]);
+  });
+
+  it("only a summary that STARTS with Background command routes", async () => {
+    const { asked, d } = recording();
+    const turn = agentFinished.replace(
+      '<summary>Agent "Adversarial review" finished</summary>',
+      '<summary>Agent "Adversarial review" finished after a Background command build for the simulator</summary>',
+    );
+    const r = await routePrompt(turn, [], d);
+    expect(r.names).toEqual([]);
+    expect(asked).toEqual([]);
+  });
+});
+
 describe("injection", () => {
   it("returns bodies with an IMPERATIVE header, not a decorative list", async () => {
     // A bare list of names is what the original delivery bug produced: the
@@ -73,6 +163,27 @@ describe("injection", () => {
     expect(r.names).toContain("visual-screenshot-verification");
     expect(r.text).toMatch(/Read and follow them before proceeding/);
     expect(r.text).toContain("Render it and look at it.");
+  });
+
+  it("stamps the routing table's version on the header, so a recorded load can be attributed", async () => {
+    const r = await routePrompt("the totals are not sticky", [], deps({
+      resolvePromptRouting: async () => ({ names: ["visual-screenshot-verification"], tableVersion: 41 }),
+      resolvePromptSkillNames: async () => { throw new Error("the versioned resolver must be preferred"); },
+    }));
+    expect(r.names).toEqual(["visual-screenshot-verification"]);
+    expect(r.header).toMatch(/\n\nRouting table v41\.$/);
+    expect(r.text).toContain("Routing table v41.");
+    // The skills line itself stays a plain list: transcript readers parse it.
+    expect(r.text).toMatch(/^\*\*Skills now active for this task:\*\* visual-screenshot-verification\n/);
+  });
+
+  it("states no version when no public table was matched", async () => {
+    const noTable = await routePrompt("the totals are not sticky", [], deps({
+      resolvePromptRouting: async () => ({ names: ["visual-screenshot-verification"] }),
+    }));
+    expect(noTable.text).not.toContain("Routing table");
+    const unwired = await routePrompt("the totals are not sticky", [], deps());
+    expect(unwired.text).not.toContain("Routing table");
   });
 
   it("caps how many bodies one call can inject", async () => {

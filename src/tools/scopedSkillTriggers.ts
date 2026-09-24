@@ -118,7 +118,9 @@ export function extractSkillTriggers(skillName: string, content: string): Trigge
   // idiom is a plain data-property op for any key. Same treatment at every
   // trigger accumulator in this file and in ledgerHandlers' merge.
   const result: TriggerExtraction = { triggers: Object.create(null) as Record<string, string[]>, errors: [] };
-  const frontmatter = content.match(/^---\n([\s\S]*?)\n---/);
+  // A SKILL.md saved with Windows line endings failed the `^---\n` match and
+  // loaded with no triggers and no error. skillDigest already accepts \r\n.
+  const frontmatter = content.replace(/\r\n?/g, "\n").match(/^---\n([\s\S]*?)\n---/);
   if (!frontmatter) return result;
 
   const body = frontmatter[1];
@@ -133,7 +135,9 @@ export function extractSkillTriggers(skillName: string, content: string): Trigge
   } else {
     const blockStart = body.match(/^prompt_triggers:\s*$/m);
     if (blockStart) {
-      const after = body.slice(body.indexOf(blockStart[0]) + blockStart[0].length);
+      // The match's own index, not indexOf: the key text can also end an
+      // earlier line (a description), and indexOf would start there.
+      const after = body.slice((blockStart.index ?? 0) + blockStart[0].length);
       for (const line of after.split("\n")) {
         // Stop at the next top-level key: an unterminated list must not swallow
         // the rest of the frontmatter and turn `description:` into a trigger.
