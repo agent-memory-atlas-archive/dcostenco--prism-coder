@@ -189,7 +189,9 @@ export async function performYouComSearch(
     throw new Error(`You.com search API error: ${scrub(envelope.error, key)}`);
   }
   const sections = envelope.results;
-  if (sections != null && typeof sections !== "object") throw new Error("You.com search returned an unexpected response shape");
+  if (sections != null && (typeof sections !== "object" || Array.isArray(sections))) {
+    throw new Error("You.com search returned an unexpected response shape");
+  }
   for (const part of [sections?.web, sections?.news]) {
     if (part != null && !Array.isArray(part)) throw new Error("You.com search returned an unexpected response shape");
   }

@@ -430,6 +430,8 @@ describe("hardening", () => {
     await expect(performYouComSearch("q")).rejects.toThrow("unexpected response shape");
     mockFetch.mockResolvedValueOnce(new Response(JSON.stringify({ results: "nope" }), { status: 200 }));
     await expect(performYouComSearch("q")).rejects.toThrow("unexpected response shape");
+    mockFetch.mockResolvedValueOnce(new Response(JSON.stringify({ results: [{ url: "https://example.org" }] }), { status: 200 }));
+    await expect(performYouComSearch("q")).rejects.toThrow("unexpected response shape");
     mockFetch.mockResolvedValueOnce(new Response(JSON.stringify({ results: { web: [
       { title: null, url: null, snippets: "hello" },
       { title: "", url: "https://example.org/a", snippets: "not-a-list", description: "Kept." },

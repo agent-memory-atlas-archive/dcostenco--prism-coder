@@ -91,7 +91,9 @@ if (!BRAVE_ANSWERS_API_KEY && process.env.PRISM_DEBUG_LOGGING === "true") {
 // Get a key at https://you.com/platform/api-keys
 // You.com's own docs use YDC_API_KEY: https://you.com/docs/using-the-api/authentication
 
-export const YDC_API_KEY = process.env.YDC_API_KEY;
+// Trimmed, and blank means unset: a whitespace-only value would otherwise
+// register the tool while every call reports the key as not configured.
+export const YDC_API_KEY = process.env.YDC_API_KEY?.trim() || undefined;
 if (process.env.PRISM_DEBUG_LOGGING === "true") {
   // Log presence or absence — non-critical, just informational
   console.error(`[Prism] You.com search: ${YDC_API_KEY ? "configured" : "not configured (youcom_web_search tool disabled)"}`);
