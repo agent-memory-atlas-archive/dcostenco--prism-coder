@@ -1445,11 +1445,11 @@ It is paid because it cannot run without Synalux behind it:
 ```typescript
 // Call 1
 prism_infer({ prompt: "My project codename is Nightjar. Reply OK.", mode: "chat" })
-// → "OK"                                  (local 9b, $0)
+// → "OK"                                  (local model, $0)
 
 // Call 2 — the model never saw call 1
 prism_infer({ prompt: "What is my codename? One word.", mode: "chat" })
-// → "I don't have that information."      (local 9b, correct and useless)
+// → "I don't have that information."      (local model, correct and useless)
 
 // Call 3 — a coding follow-up with no thread
 prism_infer({ prompt: "Now add a timeout parameter to it.", mode: "code" })
@@ -1474,7 +1474,7 @@ prism_infer({
     prompt: "What is my codename? One word.",
     mode: "chat",
 })
-// → "Nightjar"                            (local 9b, $0; history_turns: 2)
+// → "Nightjar"                            (local model, $0; history_turns: 2)
 
 prism_infer({
     messages: [
@@ -1484,7 +1484,7 @@ prism_infer({
     prompt: "Write the one-line call that stores its result in n.",
     mode: "code",
 })
-// → "n = countActiveUsers(data)"          (local 9b, $0)
+// → "n = countActiveUsers(data)"          (local model, $0)
 
 // A turn the on-device screen finds uncertain, alone or in context, is not
 // served locally: it goes to Synalux cloud on a paid plan, or is refused with
@@ -1561,6 +1561,10 @@ host, or run `prism savings` from a terminal — `--period all|month|week|sessio
     prism-coder:9b: 41 call(s), ~505K tokens
     prism-coder:4b: 12 call(s), ~4.8K tokens
 
+  Follow-ups with your conversation:
+    12 answered locally (12 by the 9b) · 2 refused by the on-device screen · 0 sent to cloud
+    Refusals by stage: follow-up alone 1 · turns together 1
+
   Counts tokens a local model handled instead of your cloud model. On the token
   axis, the token count is measured — a floor, with known undercounts listed
   when present. On the displacement axis, prism cannot observe the call your
@@ -1581,6 +1585,21 @@ your host would have used, and that choice alone is a multiple-fold spread on
 the same tokens; and most users are on flat plans where a currency figure means
 nothing at all. Tokens are the one unit prism measured itself. If you know your
 own effective rate, multiply — the split is printed for exactly that reason.
+
+**Follow-ups.** Calls that carried your conversation (`messages`) get their
+own line:
+- how many the local model answered, and how many of those the 9b answered;
+- how many the on-device screen refused, and at which stage (the follow-up read
+  alone, an earlier turn read alone, or the turns read together);
+- how many went to the cloud.
+
+A refused follow-up went back to your host instead of being answered locally,
+so this line shows how much of your follow-up work local serving actually
+took. Refusals because your plan does not include multi-turn history, or the
+history is over its cap, are counted on their own line. They are recorded only
+when the host asks for a report (`escalation: "report"`); otherwise they fail
+before anything is recorded. The line appears for the `week`, `month`, `all`
+and `--days` views, which read the durable ledger.
 
 Refused calls are excluded, the VS Code panel-playground share is disclosed
 separately, and the known sources of undercount are listed inline rather than
