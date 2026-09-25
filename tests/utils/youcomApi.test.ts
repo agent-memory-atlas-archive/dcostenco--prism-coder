@@ -422,6 +422,24 @@ describe("hardening", () => {
     expect(err?.message).not.toContain(KEY);
   });
 
+  it("the key is scrubbed before the message is shortened: a key at the cut does not leak in part", async () => {
+    const { performYouComSearch } = await getModule();
+    for (const pad of [185, 190, 195]) {
+      mockFetch.mockResolvedValueOnce(new Response(JSON.stringify({ message: "x".repeat(pad) + KEY }), { status: 500 }));
+      const err = await performYouComSearch("q").then(() => null, e => e as Error);
+      expect(err?.message, String(pad)).toContain("HTTP 500");
+      expect(err?.message, String(pad)).not.toContain(KEY.slice(0, 6));
+    }
+  });
+
+  it("an error field in a successful response is scrubbed too", async () => {
+    const { performYouComSearch } = await getModule();
+    mockFetch.mockResolvedValueOnce(new Response(JSON.stringify({ error: `quota for ${KEY} exhausted` }), { status: 200 }));
+    const err = await performYouComSearch("q").then(() => null, e => e as Error);
+    expect(err?.message).toMatch(/^You\.com search API error: quota for \[redacted\] exhausted$/);
+    expect(err?.message).not.toContain(KEY);
+  });
+
   it("malformed successful responses are errors, not 'no results'; unusable entries are skipped", async () => {
     const { performYouComSearch } = await getModule();
     mockFetch.mockResolvedValueOnce(new Response("null", { status: 200 }));
