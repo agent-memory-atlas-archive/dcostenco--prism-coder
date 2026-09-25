@@ -339,7 +339,8 @@ export async function youcomWebSearchHandler(args: unknown) {
       isError: false,
     };
   } catch (error) {
-    console.error("You.com search error:", error);
+    // The client's messages are bounded and scrubbed of the key; log the message, not the error object.
+    console.error("You.com search error:", error instanceof Error ? error.message : String(error));
     return {
       content: [{
         type: "text",

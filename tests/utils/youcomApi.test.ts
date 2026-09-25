@@ -91,6 +91,17 @@ async function getModule() {
   return import("../../src/utils/youcomApi.js");
 }
 
+// Every test in this file runs against the fake fetch: none may reach You.com.
+// (A block added outside the one that installed it once sent real requests.)
+beforeEach(() => {
+  mockFetch.mockReset();
+  mockFetch.mockImplementation(async (url: unknown) => { throw new Error(`unmocked fetch to ${String(url)}`); });
+  globalThis.fetch = mockFetch as unknown as typeof fetch;
+});
+afterEach(() => {
+  globalThis.fetch = originalFetch;
+});
+
 /** Build a fake You.com API response in the documented shape */
 function fakeSuccessResponse(webResults: number = 3, newsResults: number = 0) {
   const web = Array.from({ length: webResults }, (_, i) => ({
@@ -364,6 +375,81 @@ describe("performYouComSearch", () => {
 
     expect(result).toContain("No results found");
     expect(result).toContain("empty response");
+  });
+});
+
+describe("hardening", () => {
+  const KEY = "test-api-key-12345";
+  const lastOpts = () => mockFetch.mock.calls.at(-1)![1];
+
+  it("refuses redirects: the key and the query go to the fixed endpoint only", async () => {
+    mockFetch.mockResolvedValueOnce(new Response(JSON.stringify(fakeSuccessResponse(1)), { status: 200 }));
+    const { performYouComSearch } = await getModule();
+    await performYouComSearch("redirect check");
+    expect(lastOpts().redirect).toBe("error");
+    expect(JSON.parse(lastOpts().body)).toEqual({ query: "redirect check", count: 10 });
+  });
+
+  it("a transport error carrying the key is scrubbed and bounded", async () => {
+    mockFetch.mockRejectedValueOnce(new TypeError(`Headers.append: "${KEY}\n" is an invalid header value.` + "x".repeat(500)));
+    const { performYouComSearch } = await getModule();
+    const err = await performYouComSearch("leak check").then(() => null, e => e as Error);
+    expect(err?.message).toMatch(/^You\.com search failed \(network\): /);
+    expect(err?.message).not.toContain(KEY);
+    expect(err?.message).toContain("[redacted]");
+    expect(err!.message.length).toBeLessThan(260);
+  });
+
+  it("a timeout is named, not reported as a network or JSON error", async () => {
+    mockFetch.mockRejectedValueOnce(Object.assign(new Error("The operation was aborted due to timeout"), { name: "TimeoutError" }));
+    const { performYouComSearch } = await getModule();
+    await expect(performYouComSearch("slow")).rejects.toThrow("You.com search failed (network): timed out");
+    const slowBody = new Response("{}", { status: 200 });
+    Object.defineProperty(slowBody, "json", { value: async () => { throw Object.assign(new Error("aborted"), { name: "TimeoutError" }); } });
+    mockFetch.mockResolvedValueOnce(slowBody);
+    await expect(performYouComSearch("slow body")).rejects.toThrow("You.com search timed out reading the response");
+  });
+
+  it("HTTP errors keep the status and a readable reason, from any body shape", async () => {
+    const { performYouComSearch } = await getModule();
+    mockFetch.mockResolvedValueOnce(new Response("upstream gateway fault", { status: 502, statusText: "Bad Gateway" }));
+    await expect(performYouComSearch("q")).rejects.toThrow("You.com search returned HTTP 502: upstream gateway fault");
+    mockFetch.mockResolvedValueOnce(new Response(JSON.stringify({ error: { message: "rate limited" } }), { status: 429 }));
+    await expect(performYouComSearch("q")).rejects.toThrow("You.com search returned HTTP 429: rate limited");
+    mockFetch.mockResolvedValueOnce(new Response(JSON.stringify({ error: `bad key ${KEY}` }), { status: 401 }));
+    const err = await performYouComSearch("q").then(() => null, e => e as Error);
+    expect(err?.message).toContain("HTTP 401");
+    expect(err?.message).not.toContain(KEY);
+  });
+
+  it("malformed successful responses are errors, not 'no results'; unusable entries are skipped", async () => {
+    const { performYouComSearch } = await getModule();
+    mockFetch.mockResolvedValueOnce(new Response("null", { status: 200 }));
+    await expect(performYouComSearch("q")).rejects.toThrow("unexpected response");
+    mockFetch.mockResolvedValueOnce(new Response(JSON.stringify({ results: { web: {} } }), { status: 200 }));
+    await expect(performYouComSearch("q")).rejects.toThrow("unexpected response shape");
+    mockFetch.mockResolvedValueOnce(new Response(JSON.stringify({ results: "nope" }), { status: 200 }));
+    await expect(performYouComSearch("q")).rejects.toThrow("unexpected response shape");
+    mockFetch.mockResolvedValueOnce(new Response(JSON.stringify({ results: { web: [
+      { title: null, url: null, snippets: "hello" },
+      { title: "", url: "https://example.org/a", snippets: "not-a-list", description: "Kept." },
+    ] } }), { status: 200 }));
+    const out = await performYouComSearch("q");
+    expect(out).toContain("1. https://example.org/a");        // a missing title falls back to the url
+    expect(out).toContain("Description: Kept.");
+    expect(out).not.toContain("null");
+    expect(out).not.toMatch(/Description: h\b/);
+  });
+
+  it("the handler returns and logs the scrubbed message, never the key", async () => {
+    mockFetch.mockRejectedValueOnce(new TypeError(`invalid header value ${KEY}`));
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { youcomWebSearchHandler } = await import("../../src/tools/handlers.js");
+    const r = await youcomWebSearchHandler({ query: "handler leak check" });
+    expect(r.isError).toBe(true);
+    expect(r.content[0].text).not.toContain(KEY);
+    expect(spy.mock.calls.flat().map(String).join(" ")).not.toContain(KEY);
+    spy.mockRestore();
   });
 });
 

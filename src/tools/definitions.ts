@@ -125,8 +125,10 @@ export const YOUCOM_WEB_SEARCH_TOOL: Tool = {
         description: "Search query",
       },
       count: {
-        type: "number",
+        type: "integer",
         description: "Number of results (1-20, default 10)",
+        minimum: 1,
+        maximum: 20,
         default: 10,
       },
     },
