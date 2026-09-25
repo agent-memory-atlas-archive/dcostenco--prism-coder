@@ -61,6 +61,21 @@ function formatResult(result: YouComSearchWebResult, index: number): string {
 }
 
 /**
+ * The API takes an integer `count` (results per section, default 10); this
+ * tool allows 1–20. Tool arguments arrive from a host model and are not
+ * type-checked, so anything that is not a finite number (NaN, Infinity, a
+ * non-numeric string, null, a boolean) becomes the default, a numeric string
+ * is read as its number, a fraction is truncated, and the result is clamped.
+ */
+export function normalizeCount(count: unknown): number {
+  const n = typeof count === "number" ? count
+    : typeof count === "string" && count.trim() !== "" ? Number(count)
+    : NaN;
+  if (!Number.isFinite(n)) return 10;
+  return Math.min(20, Math.max(1, Math.trunc(n)));
+}
+
+/**
  * Performs a web search using the You.com Search API and returns
  * formatted text results (title, URL, description).
  *
@@ -77,7 +92,7 @@ export async function performYouComSearch(
 
   const body = {
     query,
-    count: Math.max(1, Math.min(count ?? 10, 20)),
+    count: normalizeCount(count),
   };
 
   debugLog(`[youcomApi] searching: query_chars=${query.length}, count=${body.count}`);

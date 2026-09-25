@@ -318,6 +318,25 @@ describe("performYouComSearch", () => {
     expect(parsedBody.count).toBe(1);
   });
 
+  it("sends an integer count from 1 to 20 whatever the host passes: non-numbers become 10, fractions truncate", async () => {
+    const cases: Array<[unknown, number]> = [
+      [Number.NaN, 10], [Number.POSITIVE_INFINITY, 10], [Number.NEGATIVE_INFINITY, 10],
+      ["abc", 10], ["", 10], ["   ", 10], [null, 10], [undefined, 10], [true, 10], [{}, 10],
+      ["7", 7], [" 12 ", 12], ["25", 20], ["-3", 1],
+      [5.9, 5], [0.4, 1], [19.99, 19], [20.5, 20],
+    ];
+    const { performYouComSearch, normalizeCount } = await getModule();
+    for (const [input, want] of cases) {
+      expect(normalizeCount(input), String(input)).toBe(want);
+      mockFetch.mockResolvedValueOnce(new Response(JSON.stringify(fakeSuccessResponse(1)), { status: 200 }));
+      await performYouComSearch("count check", input as number);
+      const [, opts] = mockFetch.mock.calls.at(-1)!;
+      const sent = JSON.parse(opts.body).count;
+      expect(sent, String(input)).toBe(want);
+      expect(Number.isInteger(sent), String(input)).toBe(true);
+    }
+  });
+
   it("parses the docs example response verbatim", async () => {
     mockFetch.mockResolvedValueOnce(
       new Response(JSON.stringify(DOCS_EXAMPLE_RESPONSE), { status: 200 })
