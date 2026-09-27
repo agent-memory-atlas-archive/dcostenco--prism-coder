@@ -11,8 +11,9 @@
  * it; escalation drops it.
  */
 import { describe, it, expect, vi, beforeEach, afterAll } from "vitest";
-import { runInfer, isPrismInferArgs, type InferDeps, type PrismInferArgs } from "../../src/tools/prismInferHandler.js";
-import { _setCacheForTest, _resetEntitlementsForTest, type PrismEntitlements } from "../../src/utils/entitlements.js";
+import { runInfer, isPrismInferArgs, type InferDeps, type PrismInferArgs, prismInferHandler } from "../../src/tools/prismInferHandler.js";
+import { passingAnswerCheck } from "../fixtures/answerCheckPolicy.js";
+import { _setCacheForTest, _resetEntitlementsForTest, type PrismEntitlements, FREE_ENTITLEMENTS } from "../../src/utils/entitlements.js";
 
 const GB = 1024 ** 3;
 const MARKER = "RESERVED_MARKER_restraint_duration";
@@ -36,7 +37,9 @@ const ent = (cloud: boolean): PrismEntitlements => ({
     upgrade_url: "https://synalux.ai/pricing",
 });
 
-beforeEach(() => _setCacheForTest(ent(false), 60_000));
+// Every plan with multi-turn has cloud (the portal plan table), and a local answer to a
+// conversation is served only after the Synalux answer check, which needs it.
+beforeEach(() => _setCacheForTest(ent(true), 60_000));
 afterAll(() => _resetEntitlementsForTest());
 
 function deps(overrides: Partial<InferDeps> = {}): InferDeps {
@@ -49,6 +52,7 @@ function deps(overrides: Partial<InferDeps> = {}): InferDeps {
         ollamaUrl: "http://localhost:11434",
         callLayer1: vi.fn(async () => "OBVIOUS_NOT_RESERVED" as const),
         probeNumCtx: async () => null,
+        ...passingAnswerCheck,   // the answer check has its own tests (answerCheck.test.ts); here it passes
         ...overrides,
     };
 }
@@ -287,7 +291,8 @@ import { multiTurnPolicy, DEFAULT_MULTI_TURN, ABSOLUTE_MULTI_TURN, type PrismEnt
 describe("E. multi-turn policy comes from entitlements (thin client)", () => {
     const turn = (role: "user" | "assistant", content: string) => ({ role, content });
     const turns = (n: number, content = "t") => Array.from({ length: n }, (_, i) => turn(i % 2 ? "assistant" : "user", content));
-    const withPolicy = (multi_turn: Ent["multi_turn"]): Ent => ({ ...ent(false), multi_turn });
+    // As in the portal plan table: plans with multi-turn have cloud, the free plan has neither.
+    const withPolicy = (multi_turn: Ent["multi_turn"]): Ent => ({ ...ent(multi_turn?.enabled === true), multi_turn });
 
     it("E1 a portal that says nothing about multi-turn gets the built-in default, which is OFF (paid feature)", () => {
         expect(DEFAULT_MULTI_TURN.enabled).toBe(false);
@@ -323,7 +328,28 @@ describe("E. multi-turn policy comes from entitlements (thin client)", () => {
         expect(r.gate_outcome?.reason).toBe("multi_turn_not_in_plan");
         expect(d.callLocal).not.toHaveBeenCalled();
         await expect(runInfer({ ...withHistory(), escalation: "serve" } as never, d))
-            .rejects.toThrow(/not included in the enterprise plan.*upgrade: https:\/\/synalux\.ai\/pricing/);
+            .rejects.toThrow(/not included in the enterprise plan.*Upgrade: https:\/\/synalux\.ai\/pricing/);
+        expect(r.next_step).toBe("Upgrade: https://synalux.ai/pricing");
+    });
+
+    it("E5b no account: refused with the free sign-in as the next step, never an upgrade, and never reaches a model", async () => {
+        _setCacheForTest({ ...FREE_ENTITLEMENTS, source: "unconfigured" }, 60_000);
+        const d = deps();
+        const r = await runInfer(withHistory(), d);
+        expect(r.gate_outcome?.reason).toBe("multi_turn_not_in_plan");
+        expect(r.next_step).toBe("Sign in with a free Synalux account: run `prism dashboard` and sign in under Account.");
+        expect(d.callLocal).not.toHaveBeenCalled();
+        const err = await runInfer({ ...withHistory(), escalation: "serve" } as never, d).then(() => null, e => e as Error);
+        expect(err?.message).toMatch(/needs a Synalux account \(a free one is enough\).*prism dashboard/);
+        expect(err?.message).not.toMatch(/upgrade/i);
+    });
+
+    it("E5c the MCP response carries the next step to the host, not only the result object", async () => {
+        _setCacheForTest({ ...FREE_ENTITLEMENTS, source: "unconfigured" }, 60_000);
+        const res = await prismInferHandler({ prompt: "How much remains?", messages: [{ role: "user", content: "Stock is 175." }], escalation: "report" });
+        const texts = res.content.map(c => c.text);
+        expect(texts).toContain("Next step: Sign in with a free Synalux account: run `prism dashboard` and sign in under Account.");
+        expect(res.isError).toBeFalsy();
     });
 
     it("E6 wild portal values are clamped to the absolute ceiling, and garbage falls back to the default", () => {

@@ -4,10 +4,11 @@
  * using injectable deps to mock both Layer 1 and cloud.
  */
 
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import { runInfer, type InferDeps } from "../prismInferHandler.js";
 import { parseLayer1, keywordBackstop, callLayer1, type Layer1Verdict } from "../../utils/layer1.js";
 import { LAYER1_PROMPT } from "../../utils/layer1.js";
+import { _resetBakedSystemCacheForTest } from "../../utils/ollamaSystemPrompt.js";
 
 // ── parseLayer1 unit tests ────────────────────────────────────────────────────
 
@@ -132,11 +133,22 @@ describe("keywordBackstop", () => {
 
 // ── callLayer1 over-length (§5.3: UNCERTAIN_LENGTH) ─────────────────────────
 
-/** Mock fetch returning a fixed classifier verdict. */
+/** Mock fetch returning a fixed classifier verdict. /api/show answers as a
+ *  model with no baked SYSTEM, so the classifier request is exactly the user
+ *  message (the baked-SYSTEM case is pinned in tests/tools/bakedSystemPrompt.test.ts). */
 const classifierFetch = (verdict: string) =>
-    vi.fn(async () => new Response(JSON.stringify({ message: { content: verdict } }), { status: 200 }));
+    vi.fn(async (input: unknown) => String(input).endsWith("/api/show")
+        ? new Response(JSON.stringify({ modelfile: "FROM /blob\n" }), { status: 200 })
+        : new Response(JSON.stringify({ message: { content: verdict } }), { status: 200 }));
+
+/** The classifier requests only, in order (the model inspection is not one). */
+const chatCalls = (spy: { mock: { calls: unknown[][] } }) =>
+    spy.mock.calls.filter(c => String(c[0]).endsWith("/api/chat"));
+const chatBody = (spy: { mock: { calls: unknown[][] } }, i = 0) =>
+    JSON.parse((chatCalls(spy)[i][1] as { body: string }).body);
 
 describe("callLayer1 over-length (§5.3)", () => {
+    beforeEach(() => { _resetBakedSystemCacheForTest(); });
     const HEAD = "This is the beginning of a long benign refactoring request. ";
     const MIDDLE = "middle filler content about data processing ".repeat(150);
     const TAIL = " And this is the very end of the request, thanks.";
@@ -154,13 +166,13 @@ describe("callLayer1 over-length (§5.3)", () => {
         const fetchSpy = classifierFetch("OBVIOUS_NOT_RESERVED");
         const result = await callLayer1(cleanOversize, "http://x", "model", fetchSpy as unknown as typeof fetch);
         expect(result).toBe("UNCERTAIN_LENGTH");
-        expect(fetchSpy).toHaveBeenCalledTimes(1);
+        expect(chatCalls(fetchSpy)).toHaveLength(1);
     });
 
     it("classifier receives a bounded head+tail excerpt, not the full prompt", async () => {
         const fetchSpy = classifierFetch("OBVIOUS_NOT_RESERVED");
         await callLayer1(cleanOversize, "http://x", "model", fetchSpy as unknown as typeof fetch);
-        const body = JSON.parse((fetchSpy.mock.calls[0] as unknown[])[1]!["body" as never] as string);
+        const body = chatBody(fetchSpy);
         const sent: string = body.messages[0].content;
         expect(sent).toContain(HEAD.trim());
         expect(sent).toContain(TAIL.trim());
@@ -186,14 +198,14 @@ describe("callLayer1 over-length (§5.3)", () => {
         const failingFetch = vi.fn(async () => { throw new Error("connection refused"); });
         const result = await callLayer1(cleanOversize, "http://x", "model", failingFetch as unknown as typeof fetch);
         expect(result).toBe("UNCERTAIN_LENGTH");
-        expect(failingFetch).toHaveBeenCalledTimes(2); // initial + retry
+        expect(chatCalls(failingFetch)).toHaveLength(2); // initial + retry
     });
 
     it("normal-size prompts are unaffected — full prompt sent, verdict passthrough", async () => {
         const fetchSpy = classifierFetch("OBVIOUS_NOT_RESERVED");
         const result = await callLayer1("short benign prompt", "http://x", "model", fetchSpy as unknown as typeof fetch);
         expect(result).toBe("OBVIOUS_NOT_RESERVED");
-        const body = JSON.parse((fetchSpy.mock.calls[0] as unknown[])[1]!["body" as never] as string);
+        const body = chatBody(fetchSpy);
         expect(body.messages[0].content).toContain("short benign prompt");
         expect(body.messages[0].content).not.toContain("[…]");
     });
@@ -209,7 +221,7 @@ describe("callLayer1 over-length (§5.3)", () => {
         const prompt = half + " " + marker + " " + half;
         const fetchSpy = classifierFetch("OBVIOUS_NOT_RESERVED");
         await callLayer1(prompt, "http://x", "model", fetchSpy as unknown as typeof fetch);
-        const body = JSON.parse((fetchSpy.mock.calls[0] as unknown[])[1]!["body" as never] as string);
+        const body = chatBody(fetchSpy);
         expect(body.messages[0].content).toContain(marker);
     });
 
@@ -226,7 +238,7 @@ describe("callLayer1 over-length (§5.3)", () => {
         const fetchSpy = classifierFetch("OBVIOUS_NOT_RESERVED");
         const result = await callLayer1(prompt, "http://x", "model", fetchSpy as unknown as typeof fetch);
         expect(result).toBe("UNCERTAIN_LENGTH");
-        const body = JSON.parse((fetchSpy.mock.calls[0] as unknown[])[1]!["body" as never] as string);
+        const body = chatBody(fetchSpy);
         expect(body.messages[0].content).not.toContain("pin the person");
     });
 });

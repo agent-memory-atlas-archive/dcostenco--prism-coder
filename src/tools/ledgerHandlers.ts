@@ -696,14 +696,23 @@ function localWorkerLine(): string {
   const ent = peekEntitlements();
   if (!ent) return "";
   const p = multiTurnPolicy(ent);
-  return p.enabled
-    ? `\n> - 🧵 **Local worker multi-turn:** on — up to ${p.max_turns} turns / ` +
-      `${p.max_chars.toLocaleString("en-US")} chars per prism_infer call; pass accepted prior turns as \`messages\``
+  if (p.enabled) {
+    return `\n> - 🧵 **Local worker multi-turn:** on — up to ${p.max_turns} turns / ` +
+      `${p.max_chars.toLocaleString("en-US")} chars per prism_infer call; pass accepted prior turns as \`messages\``;
+  }
+  return ent.source === "unconfigured"
+    ? `\n> - 🧵 **Local worker multi-turn:** off without an account — a free Synalux account turns it on ` +
+      `(run \`prism dashboard\`, sign in under Account)`
     : `\n> - 🧵 **Local worker multi-turn:** off on the ${ent.plan} plan — a prism_infer follow-up is answered without context`;
 }
 
 function freeTierUpgradeLine(tier: string): string {
   if (tier !== "free") return "";
+  // No account yet: the next step is a free sign-in, not a purchase.
+  if (peekEntitlements()?.source === "unconfigured") {
+    return `\n> - 💎 **Free account:** sign in for free to get multi-turn and 20 cloud answers a day ` +
+      `(run \`prism dashboard\`, sign in under Account)`;
+  }
   return `\n> - 💎 **Free tier:** paid plans unlock the full skill library, ` +
     `super-skills, and agent routing → ${FREE_ENTITLEMENTS.upgrade_url}`;
 }

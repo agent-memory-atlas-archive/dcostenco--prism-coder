@@ -1822,6 +1822,15 @@ describe("ledgerHandlers", () => {
             ent._setCacheForTest({ ...ent.FREE_ENTITLEMENTS, plan: "free", multi_turn: { enabled: false, max_turns: 0, max_chars: 0 } }, 60_000);
             const off = (await sessionBootstrapHandler({})).content[0].text as string;
             expect(off).toContain("Local worker multi-turn:** off on the free plan");
+            // no account: the line says what turns it on, a free sign-in
+            ent._setCacheForTest({ ...ent.FREE_ENTITLEMENTS, source: "unconfigured" }, 60_000);
+            const anon = (await sessionBootstrapHandler({})).content[0].text as string;
+            expect(anon).toContain("Local worker multi-turn:** off without an account — a free Synalux account turns it on");
+            expect(anon).not.toContain("off on the free plan");
+            if (tier === "free") {
+              expect(anon).toContain("💎 **Free account:** sign in for free to get multi-turn and 20 cloud answers a day");
+              expect(off).toContain("💎 **Free tier:** paid plans unlock the full skill library");
+            }
           } finally {
             ent._resetEntitlementsForTest();
           }

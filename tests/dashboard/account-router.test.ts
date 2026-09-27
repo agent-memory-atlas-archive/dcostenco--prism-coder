@@ -32,6 +32,7 @@ function harness(initial: Record<string, string> = {}) {
   const getJwt = vi.fn().mockResolvedValue("eyJ.fixture.jwt");
   const invalidateJwt = vi.fn();
   const invalidateEntitlements = vi.fn();
+  const clearInferencePolicies = vi.fn();
   const closeStorage = vi.fn(async () => {});
   const setSetting = vi.fn(async (key: string, value: string) => { settings.set(key, value); });
   const deps: AccountRouterDeps = {
@@ -41,11 +42,12 @@ function harness(initial: Record<string, string> = {}) {
     getJwt,
     invalidateJwt,
     invalidateEntitlements,
+    clearInferencePolicies,
     closeStorage,
     resolvePortalBaseUrl: vi.fn(() => ORIGIN),
     usablePortalKey: vi.fn(() => settings.get("PRISM_SYNALUX_API_KEY") || process.env.PRISM_SYNALUX_API_KEY),
   };
-  return { settings, fetcher, getJwt, invalidateJwt, invalidateEntitlements, closeStorage, setSetting, deps };
+  return { settings, fetcher, getJwt, invalidateJwt, invalidateEntitlements, clearInferencePolicies, closeStorage, setSetting, deps };
 }
 
 describe("dashboard account service", () => {
@@ -150,6 +152,16 @@ describe("dashboard account service", () => {
     });
   });
 
+  it("keeps Prism's own Pro or Team next to the tier it includes; anything else is no Prism plan", async () => {
+    const h = harness({ PRISM_SYNALUX_API_KEY: TOKEN });
+    for (const [prism_plan, plan, want] of [
+      ["pro", "standard", "pro"], ["team", "advanced", "team"], ["enterprise", "standard", null], [undefined, "standard", null],
+    ] as const) {
+      h.fetcher.mockResolvedValueOnce(new Response(JSON.stringify({ ...account(plan), prism_plan }), { status: 200 }));
+      await expect(loadDashboardAccount(h.deps)).resolves.toMatchObject({ plan, prism_plan: want });
+    }
+  });
+
   it("exchanges a one-time Prism code, stores the credential, and loads the account", async () => {
     const h = harness();
     h.fetcher.mockImplementation(async (input, init) => {
@@ -167,6 +179,8 @@ describe("dashboard account service", () => {
     expect(h.settings.get("PRISM_SYNALUX_SIGNED_OUT")).toBe("false");
     expect(h.invalidateJwt).toHaveBeenCalled();
     expect(h.invalidateEntitlements).toHaveBeenCalled();
+    // a new account starts without the previous one's cached inference policies
+    expect(h.clearInferencePolicies).toHaveBeenCalled();
     expect(h.closeStorage).toHaveBeenCalledOnce();
     expect(JSON.stringify(result)).not.toContain(TOKEN);
   });
@@ -250,6 +264,7 @@ describe("dashboard account service", () => {
     process.env.PRISM_SYNALUX_API_KEY = TOKEN;
     h.fetcher.mockResolvedValue(new Response(JSON.stringify({ revoked: true }), { status: 200 }));
     await expect(signOutDashboardAccount(h.deps)).resolves.toEqual({ signed_out: true, revoked: true });
+    expect(h.clearInferencePolicies).toHaveBeenCalled();
     expect(h.settings.get("PRISM_SYNALUX_SIGNED_OUT")).toBe("true");
     expect(h.settings.get("PRISM_SYNALUX_API_KEY")).toBe("");
     expect(process.env.PRISM_SYNALUX_API_KEY).toBeUndefined();

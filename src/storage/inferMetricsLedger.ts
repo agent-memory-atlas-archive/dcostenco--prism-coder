@@ -57,6 +57,11 @@ export interface InferMetricRow {
      *  'rules' | 'isolated' | 'prompt' | 'context' | 'budget' | 'backstop'. Names the layer
      *  to fix when benign work is refused. */
     refusal_layer?: string;
+    /** When the 4b screen hedged on a multi-turn call, what the 9b's second
+     *  read did: cleared_9b | confirmed_9b | reserved_9b | deadline |
+     *  skipped_<why>. Null otherwise. Makes "how often did the 9b overturn a
+     *  hedge" a query. */
+    layer1_second_read?: string;
 }
 
 let client: ReturnType<typeof createClient> | null = null;
@@ -68,8 +73,8 @@ const LEDGER_UNAVAILABLE_ERROR = "Inference metrics ledger is unavailable";
 const INSERT_METRIC_SQL = `INSERT OR IGNORE INTO infer_metrics
     (ts, caller, mode, backend, model, used_cloud, gate_outcome,
      refusal_reason, prompt_tokens, completion_tokens, latency_ms, ram_free_mb,
-     source_event_id, history_turns, refusal_layer)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+     source_event_id, history_turns, refusal_layer, layer1_second_read)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
 
 function closeClient(context: string): void {
     const activeClient = client;
@@ -110,7 +115,8 @@ function ensureTable(): Promise<void> {
                     ram_free_mb INTEGER,
                     source_event_id TEXT,
                     history_turns INTEGER,
-                    refusal_layer TEXT
+                    refusal_layer TEXT,
+                    layer1_second_read TEXT
                 )`);
             // Existing ledgers predate external panel-spool ingestion. SQLite has
             // no ADD COLUMN IF NOT EXISTS, so use the repository's established
@@ -119,6 +125,7 @@ function ensureTable(): Promise<void> {
                 "source_event_id TEXT",
                 "history_turns INTEGER",
                 "refusal_layer TEXT",
+                "layer1_second_read TEXT",
             ]) {
                 try {
                     await client.execute(`ALTER TABLE infer_metrics ADD COLUMN ${column}`);
@@ -190,6 +197,7 @@ function metricArgs(row: InferMetricRow): Array<string | number | null> {
         row.completion_tokens ?? null, row.latency_ms ?? null,
         row.ram_free_mb ?? null, row.source_event_id ?? null,
         row.history_turns ?? null, row.refusal_layer ?? null,
+        row.layer1_second_read ?? null,
     ];
 }
 

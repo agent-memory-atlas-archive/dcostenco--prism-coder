@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "evaluator": "answer-check/1",
+  "answer_check": {
+    "system_prompt": "SYNTHETIC CHECK RULES (test fixture). Compare the candidate answer with the conversation. Reply with exactly one word: PASS or FAIL.",
+    "reminder": "Not a verdict. One word: PASS or FAIL.",
+    "verdict_only": "One word: PASS or FAIL.",
+    "correction": { "lead": "Arithmetic slip: ", "line": "{expression} is {correct}, not {stated}", "join": " / ", "tail": ". Decide again: PASS or FAIL." },
+    "arithmetic": {
+      "number": "[$]?\\d+(?:,\\d{3})*(?:\\.\\d+)?",
+      "start": "(?<![\\w.,$])(?<![+\\-−×*\\/÷]\\s*)",
+      "minus_or_plus": "\\s*[+−]\\s*|\\s+-\\s+",
+      "end": "(?![\\w.…]|\\s*[+\\-−×*\\/÷=]\\s*\\d)",
+      "quoted": "\"[^\"\\n]*\"",
+      "scale_powers": [-2, -1, 1, 2]
+    }
+  }
+}

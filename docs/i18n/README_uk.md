@@ -158,6 +158,27 @@ or by re-enabling after each run.
 <details>
 <summary>Release history (optional)</summary>
 
+## What's New in v20.21.16
+
+### Conversations: checked on your device, and free with an account
+
+- A local answer to a conversation is checked on your device before it is
+  served. If the check fails or cannot run, the answer goes to the cloud when
+  your plan and settings allow it, and is withheld otherwise.
+- On Pro and Team, a local answer that passes is also confirmed by Synalux, on
+  a copy pseudonymized on your device; the mapping stays on your device. With
+  an image attached, or with the cloud off, the checked local answer is served.
+- When the on-device screen's 4b is unsure about a conversation, the 9b reads
+  it again before the conversation is refused or sent to the cloud.
+- Everything local is free with no account and no cap on the local model size.
+  A free Synalux account adds multi-turn `prism_infer` and 20 cloud answers a
+  day. Pro ($15/month) and Team ($20/seat/month) are Prism's own plans.
+- Optional You.com web search: set `YDC_API_KEY` to enable
+  `youcom_web_search` (contributed by @mouse-value-add in #227).
+- Fixed: the 2b and 4b no longer answer Prism's own requests as a tool router.
+  A system prompt built into those models had turned some answers into tool
+  calls and made the on-device screen refuse some ordinary requests.
+
 ## What's New in v20.21.15
 
 ### Follow-ups: see what runs locally, and a stricter screen when the classifier is down
@@ -1150,7 +1171,7 @@ The free tier runs entirely on your machine. Paid tiers add cloud sync through t
 | Inference | Local Ollama models | Local models + Gemini 3.6 Flash fallback |
 | API keys required | None | Synalux subscription key |
 | Web search / scrape | Not included | Via Synalux portal (provider keys server-side) |
-| What leaves your machine | Nothing | Memory text, file paths, search queries, and inference prompts/drafts when their cloud feature is used, sent to the portal over TLS. Cloud memory writes are PHI-redacted; inference and route requests are transient. |
+| What leaves your machine | Nothing | Memory text, file paths, search queries, and inference prompts/drafts when their cloud feature is used, sent to the portal over TLS. Cloud memory writes have personal identifiers redacted; inference and route requests are transient. |
 | Works offline | ✅ | Local features yes; sync/cloud no |
 
 **Handling sensitive data.** Cloud memory writes pass through automatic
@@ -1159,8 +1180,7 @@ and clinical identifiers are stripped before storage). Cloud inference and
 route correction send the request over TLS for processing and do not store it
 as Prism memory. The **local tier** (no Synalux key) is the air-gap;
 `route_guard: "local"` only skips the route correction, and `cloud_fallback`
-and `verify` govern the other two channels. **Enterprise** includes a HIPAA
-Business Associate Agreement.
+and `verify` govern the other two channels.
 
 ---
 
@@ -1186,8 +1206,8 @@ and telemetry still contact the portal and carry neither.
 |---|---|---|---|---|---|---|
 | Qwen3.5-4B Q4_K_S | `prism-coder:2b` | 3.3 GB | ✅ | 100% | On-device / lowest RAM (4.5 GiB free) | Free |
 | Qwen3.5-4B Q4_K_M | `prism-coder:4b` | 3.5 GB | ✅ | 100% | Verifier (5.2 GiB free) | Free |
-| Qwen3.5-9B (LoRA) | `prism-coder:9b` | 6.7 GB | ✅ | 95.7%² | Default router / workhorse (9 GiB free) | Standard+ |
-| Qwen3.5-27B (LoRA) | `prism-coder:27b` | 16.8 GB | — | 100% | Complex code / quality (21 GiB free) | Advanced+ |
+| Qwen3.5-9B (LoRA) | `prism-coder:9b` | 6.7 GB | ✅ | 95.7%² | Default router / workhorse (9 GiB free) | Free |
+| Qwen3.5-27B (LoRA) | `prism-coder:27b` | 16.8 GB | — | 100% | Complex code / quality (21 GiB free) | Free |
 
 ¹ Self-run on a narrow 115-case MCP tool-selection suite, `temperature: 0`,
 measured through the call path `prism_infer` actually uses (`/api/chat`, each
@@ -1299,74 +1319,64 @@ an image is never escalated; screenshots stay on this device.
 
 ## Why Prism Coder
 
-### vs AI coding assistants
+**Your local data stays on your device.** Memory, local models and the answer
+check run on your machine, with no account. Data leaves it only when you turn
+on a cloud feature, and then only what that feature needs; see
+[Local-first and privacy](#local-first-and-privacy).
 
-Product capabilities and plans change frequently. The comparison below is
-intentionally limited to publicly documented differences; it is not a claim
-that another product lacks an unlisted feature.
+- **Free without an account**, with no cap on the local model size.
+- **Memory and models in one MCP server:** persistent memory, a knowledge graph
+  and automatic routing to local Ollama models, with cloud answers only when
+  your plan and settings allow them.
+- **Checked answers:** a multi-turn local answer is checked on your device
+  before it is served.
 
-Legend: ✅ documented, ◐ conditional or plan-dependent, — not compared, ? verify
-with the provider.
+### How it compares
 
-| Capability | Prism Coder | GitHub Copilot | Cursor | Amazon Q Developer |
-|---|:---:|:---:|:---:|:---:|
-| Local/open-weight inference | ✅ | ◐ | ◐ | ◐ |
-| Offline workflow | ✅ | ◐ | ? | ? |
-| Cross-session memory | ✅ | ◐ ([docs](https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-command-reference)) | ◐ | ◐ |
-| MCP integration | ✅ | ✅ ([docs](https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-command-reference)) | ✅ ([pricing](https://cursor.com/en-US/pricing)) | ◐ |
-| Local-first model routing | ✅ | ◐ | ◐ | ◐ |
-| Session drift and grounding checks | ✅ | — | — | — |
-| Setup surface | ✅ five hosts | ✅ CLI/IDE | ✅ editor/agents | ✅ IDE/CLI ([overview](https://aws.amazon.com/q/developer/build/)) |
-| Pricing model | ✅ Synalux tiers | ◐ | ◐ ([pricing](https://cursor.com/en-US/pricing)) | ✅ free + $19 Pro ([pricing](https://aws.amazon.com/q/developer/pricing/)) |
+Prices from each vendor's pricing page, checked on 2026-09-26. Plans change
+often; follow the links for current terms. The table compares published plans
+only; it is not a claim that a product lacks an unlisted feature.
 
-Prism-specific compliance, contractual, and pricing terms are documented in
-the Synalux service agreement. Do not infer a competitor's HIPAA, BAA, or data
-handling status from this table.
-
-### vs local AI / memory tools
-
-| Feature | Prism Coder | Ollama | LM Studio | Mem0 | Zep |
-|---|:---:|:---:|:---:|:---:|:---:|
-| Local inference cascade | ✅ | ✅ runtime | ✅ app | — | — |
-| Cloud fallback | ✅ optional | — | ◐ provider-dependent | ◐ | ◐ |
-| Persistent memory | ✅ | — | ◐ project context | ✅ | ✅ |
-| Knowledge/tool integration | ✅ MCP + ingestion | ◐ APIs | ◐ integrations | ✅ SDK/API | ✅ SDK/API |
-| MCP server | ✅ native | — | ◐ client integration | ◐ client integration | ◐ client integration |
-
-### Pricing
-
-Prism's current published tiers are listed below. Competitor pricing is
-usage- and plan-dependent, so consult the provider directly: [GitHub
-Copilot](https://github.com/features/copilot/plans), [Cursor](https://cursor.com/en-US/pricing),
-and [Amazon Q Developer](https://aws.amazon.com/q/developer/pricing/).
+| Product | What it is | Free | Individual | Team, per seat |
+|---|---|---|---|---|
+| **Prism Coder** | Local memory and model routing (MCP), optional cloud | Everything local, no account | Pro $15/mo | $20, 2-seat minimum |
+| [GitHub Copilot](https://docs.github.com/en/copilot/get-started/plans) | Coding assistant | Limited | Pro $10, Pro+ $39, Max $100 | Business $19, Enterprise $39 |
+| [Cursor](https://cursor.com/pricing) | AI code editor | Hobby, limited | Pro $20 | Teams $40 |
+| [Windsurf](https://devin.ai/blog/windsurf-pricing-plans) | AI code editor | Free plan | Pro $20, Max $200 | Teams $40 |
+| [Claude](https://claude.com/pricing) | Assistant; Claude Code from Pro | Free (no Claude Code) | Pro $20, Max from $100 | Team $25 ($20 billed annually) |
+| [Amazon Q Developer](https://aws.amazon.com/q/developer/pricing/) | Coding assistant | 50 agentic requests a month | Pro $19 per user | -- |
+| [Ollama](https://ollama.com/pricing) | Local model runtime, cloud models | Local models, starter cloud credits | Pro $20 ($60 of cloud credits), Max $100 | Team $500/mo, unlimited users |
+| [Mem0](https://mem0.ai/pricing) | Memory API | 10,000 adds, 1,000 retrievals a month | Starter $19; graph memory from Pro $249 | -- |
+| [Supermemory](https://supermemory.ai/pricing/) | Memory API | $5 of credits a month | Pro $19 (3 seats), Max $100 | -- |
+| [Zep](https://www.getzep.com/pricing/) | Memory (knowledge graph) | 10,000 credits a month | Flex $125 | -- |
+| [Pieces](https://pieces.app/pricing) | On-device developer memory | None (7-day trial) | Pro $18.99 | Enterprise $22.99 |
+| [MemPalace](https://www.mempalace.net/) | Open-source local memory (MIT) | Free | -- | -- |
 
 ---
 
 ## Plans
 
-All on-device models are free to run locally via Ollama on every tier. A subscription gates **cloud** features, higher automatic-routing ceilings, and increased limits. On-device models run through your Ollama regardless of plan; the ceiling applies only to cloud inference and automatic `prism_infer` routing.
+Everything that runs on your machine is free, with no account and no cap on the local model. A free Synalux account adds what needs Synalux; Pro and Team add cloud features and higher limits.
 
-| | **Free** | **Standard** $19/mo | **Advanced** $49/mo | **Enterprise** $99/mo |
+| | **Free** (no account) | **Free account** | **Pro** $15/mo | **Team** $20/seat/mo |
 |---|---|---|---|---|
-| Seats | 1 | 1 | up to 5 | up to 25 |
-| Automatic `prism_infer` ceiling | up to 4b | up to 9b | up to 27b | up to 27b |
-| Cloud inference | -- | ✅ | ✅ | ✅ (priority) |
-| Cloud Coder (Web IDE) | -- | ✅ | ✅ | ✅ (priority) |
-| Cloud search | -- | ✅ | ✅ | ✅ |
-| Max output tokens | 512 | 1,024 | 2,048 | 4,096 |
-| Cloud fallback | -- | Gemini 3.6 Flash | Gemini 3.6 Flash | Gemini 3.6 Flash (priority) |
-| Multi-turn `prism_infer` (conversation carried across calls) | -- | 12 turns / 32k chars | 20 turns / 64k chars | 30 turns / 96k chars |
-| Grounding verifier (fact-check AI output) | -- | ✅ | ✅ | ✅ |
-| Memory sync (cloud) | -- | ✅ | ✅ | ✅ |
-| Knowledge / session memory | limited | unlimited | unlimited | unlimited |
-| Analytics dashboard | -- | ✅ | ✅ | ✅ |
-| HIPAA BAA | -- | -- | -- | ✅ |
+| Local models via Ollama (automatic `prism_infer` routing) | up to 27b | up to 27b | up to 27b | up to 27b |
+| Local memory, knowledge graph, dashboard, MCP tools | ✅ | ✅ | ✅ | ✅ |
+| Multi-turn `prism_infer`, with the on-device answer check | -- | 12 turns / 32k chars | 12 turns / 32k chars | 20 turns / 64k chars |
+| Cloud answers (Gemini 3.6 Flash; a free account's conversations: 3.5 Flash-Lite) | -- | 20/day | 1,000/month (500 in the trial; 200/day max) | 1,500/month per seat (200/day max) |
+| Cloud confirmation of a local answer (on a pseudonymized copy) | -- | -- | ✅ | ✅ |
+| Grounding verifier (fact-check AI output; counts as a cloud answer) | -- | -- | ✅ | ✅ |
+| Cloud search | -- | -- | 1,000/month (150/day max) | 1,500/month per seat (150/day max) |
+| Memory sync (cloud) | -- | -- | ✅ | ✅ |
+| Full skill library, super-skills, agent routing, account and team skills | -- | -- | ✅ | ✅ |
+| Seats | 1 | 1 | 1 | 2 or more |
 
-Paid plans start with a 14-day trial. No card is required to start; add payment
+Pro starts with a 14-day trial. No card is required to start; add payment
 details before the trial ends to continue, or the subscription cancels
-automatically and local Prism Free remains available. View the exact deadline
-under **⚙ Account & Settings → Account** in `prism dashboard`. 25+ seats:
-[contact sales](https://synalux.ai/support)
+automatically and Prism Free remains available. View the exact deadline under
+**⚙ Account & Settings → Account** in `prism dashboard`. A cloud confirmation
+counts as one of the day's cloud answers. To start a Team plan:
+[contact sales](https://synalux.ai/support).
 
 ---
 
@@ -1721,10 +1731,10 @@ command surface, safety model, and verified acceptance cases.
   <img src="docs/scm_search_cli.jpg" alt="prism search — semantic code search with relevance scores" width="500" />
 </p>
 
-### `prism review` — AI code review with HIPAA checks
+### `prism review` — AI code review with security and privacy checks
 
 <p align="center">
-  <img src="docs/scm_review_cli.jpg" alt="prism review — AI code review with security and HIPAA findings" width="400" />
+  <img src="docs/scm_review_cli.jpg" alt="prism review — AI code review with security and privacy findings" width="400" />
 </p>
 
 ### `prism scan` — security scanner for secrets, Dockerfiles, licenses
@@ -1784,9 +1794,9 @@ AI chat, voice input, SOAP note generator, team collaboration, and video calls �
 <summary>Feature details</summary>
 
 - **AI**: Chat participant (`@synalux`), multi-agent pipeline, voice input, model switching, 10 tones
-- **Clinical**: SOAP note generator, role-based access, document signing, patient board
+- **Clinical**: SOAP note generator, role-based access, document signing
 - **Collaboration**: Team chat, DMs, video calls, customer board, visual builder, DevContainers
-- **Privacy**: Local Ollama by default. `preferLocal=true` tries local first. Enterprise BAA available.
+- **Privacy**: Local Ollama by default. `preferLocal=true` tries local first.
 </details>
 
 ### Prism AAC
@@ -1885,25 +1895,37 @@ It reads `~/.prism-mcp/data.db` and POSTs entries to the portal. Ledger entries 
 
 | Feature | Details |
 |---------|---------|
-| Local inference | Direct Ollama use is unrestricted; automatic `prism_infer` routing selects up to 4B |
+| Local inference | Direct Ollama use is unrestricted; automatic `prism_infer` routing selects up to 27B, as far as your machine's memory allows |
 | Session memory | Persistent sessions, handoffs, ledger — all local SQLite |
 | Knowledge search | Semantic search across session history |
 | Skills | All skills available locally (run `sync-skills.sh` to populate) |
 | Drift detection | Server-side GATE 5 reminders |
 
-### Paid (Synalux subscription)
+### Free account (Synalux sign-in, $0)
 
 Everything in Free, plus:
 
 | Feature | Details |
 |---------|---------|
-| Model ceiling | Automatic `prism_infer` routing up to 27B + Gemini 3.6 Flash fallback when local is unavailable |
+| Multi-turn `prism_infer` | Conversation history carried across calls; each local answer is checked on your device before it is served |
+| Cloud answers | 20 a day from Gemini when a local answer cannot be used: 3.5 Flash-Lite in a conversation, 3.6 Flash for a single prompt |
+
+Sign in from `prism dashboard` under **Account**.
+
+### Pro ($15/mo) and Team ($20/seat/mo, 2-seat minimum)
+
+Everything in the free account, plus:
+
+| Feature | Details |
+|---------|---------|
+| Cloud answers | 1,000 a month (Pro; 500 during the 14-day trial) or 1,500 a month per seat (Team), at most 200 a day, from Gemini 3.6 Flash; a cloud confirmation counts as one |
+| Answer confirmation | A local answer that passed the on-device check is also confirmed by Synalux, on a copy with names, dates and other identifiers replaced on your device |
 | Skill routing | Portal resolves which skills to load based on your project and prompt |
 | Cross-device memory | Supabase cloud sync — sessions survive across machines |
 | Grounding verifier | L3 NLI verification on model outputs |
-| Team features | Multi-agent Hivemind, workspace collaboration |
+| Team features | Multi-agent Hivemind, workspace collaboration, account and team skills |
 
-The paid tier adds **intelligent routing** — the Synalux portal determines which skills are relevant to your current project and prompt, so your agent gets domain expertise (stripe patterns, training protocols, clinical standards) instead of loading everything. Free users with the repo can run `sync-skills.sh` to populate all skills locally; paid routing adds project-aware and prompt-aware selection.
+The paid tiers add **intelligent routing** — the Synalux portal determines which skills are relevant to your current project and prompt, so your agent gets domain expertise (stripe patterns, training protocols, clinical standards) instead of loading everything. Free users with the repo can run `sync-skills.sh` to populate all skills locally; paid routing adds project-aware and prompt-aware selection.
 
 - Contributions require signing the [CLA](../../CLA.md).
 - "Prism" and "Synalux" are trade names of Synalux LLC; the Apache license does

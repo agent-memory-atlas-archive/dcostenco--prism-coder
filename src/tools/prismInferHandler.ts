@@ -39,6 +39,7 @@ type GroundingOutcome = { action: string; finalText: string; claims: unknown[]; 
 import { getEntitlements, clampCeiling, type PrismEntitlements, FREE_ENTITLEMENTS, multiTurnPolicy, ABSOLUTE_MULTI_TURN, type MultiTurnEntitlement } from "../utils/entitlements.js";
 import { ddLog } from "../utils/ddLogger.js";
 import { stripThink } from "../utils/thinkStrip.js";
+import { leadingSystemMessages } from "../utils/ollamaSystemPrompt.js";
 import { passesQualityGate } from "../utils/qualityGate.js";
 import {
     passesClinicalQualityGate,
@@ -52,7 +53,10 @@ import {
     passesCodingQualityGate,
 } from "../utils/codingQualityPolicy.js";
 import { checkInputSafety, checkOutputSafety } from "../utils/safetyGate.js";
-import { callLayer1 as defaultCallLayer1, classifyDeterministicLayer1, keywordBackstop, reservedCategory, MAX_CLASSIFIER_PROMPT_LENGTH, type Layer1Verdict } from "../utils/layer1.js";
+import { callLayer1 as defaultCallLayer1, classifyDeterministicLayer1, keywordBackstop, reservedCategory, MAX_CLASSIFIER_PROMPT_LENGTH, layer1ClassifierContent, secondReadExclusion, type Layer1Verdict, type SecondReadExclusionPolicy } from "../utils/layer1.js";
+import { getSecondReadPolicy, getAnswerCheckPolicy } from "../utils/inferencePolicy.js";
+import { pseudonymizeForCheck } from "../utils/pseudonymize.js";
+import { answerGroundingBytes, answerGroundingContent, parseGroundingVerdict, arithmeticSlips, arithmeticCorrection, ANSWER_GROUNDING_OUTPUT_TOKENS, ANSWER_GROUNDING_THINK, ANSWER_GROUNDING_THINK_TOKENS, ANSWER_GROUNDING_TIMEOUT_MS, ANSWER_GROUNDING_RETRY_TIMEOUT_MS, ANSWER_GROUNDING_FOLLOW_UP_TOKENS, type AnswerGroundingVerdict, type AnswerCheckPolicy } from "../utils/answerGrounding.js";
 import { recordInference, recordThinkOnlyRetry, formatInferenceMetrics, estimateTokens } from "../utils/inferenceMetrics.js";
 import { appendInferMetric } from "../storage/inferMetricsLedger.js";
 import { getStorage } from "../storage/index.js";
@@ -62,6 +66,7 @@ import {
     applyLocalRouteContract,
     isRouteToolName,
     parseRouteOutput,
+    routeServesProse,
     validatePortalRouteGuardOutcome,
     type RouteGuardOutcome,
 } from "../utils/routeContract.js";
@@ -287,6 +292,207 @@ const LAYER1_HISTORY_CACHE_MAX = 1_000;
 export const LAYER1_HISTORY_CACHE_TTL_MS = 15 * 60_000;
 const layer1HistoryCache = new Map<string, { verdict: Layer1Verdict; expiresAt: number }>();
 export function _resetLayer1HistoryCacheForTest(): void { layer1HistoryCache.clear(); }
+/** Hard bounds on the 9b's second read. A hedge is left standing (the
+ *  shipped outcome) rather than exceed either.
+ *  - Calls: the model calls it would make — cached verdicts are not calls —
+ *    are counted before the first read and again as each read starts (a
+ *    verdict can expire in between). Counting cached reads turned the second
+ *    read off for any long conversation, however little of it was new.
+ *  - Deadline: from the second read's first step, the residency and limits
+ *    probes included (they alone can take many seconds on a cold model). Every
+ *    probe and read races the time left, and no clearance is accepted after it. */
+export const LAYER1_SECOND_READ_MAX_CALLS = 48;
+export const LAYER1_SECOND_READ_DEADLINE_MS = 30_000;
+/** Reads in flight at once: ONE (owner decision 2026-09-26, after review).
+ *  Two at once made each classifier read about twice as slow and some reads
+ *  abort at the classifier's first-attempt timeout (an aborted read keeps the
+ *  hedge: refusal or cloud), for little clearance time gained. The per-read
+ *  p95 gate stays. The queue still takes a concurrency for tests and future
+ *  measurement. */
+export const LAYER1_SECOND_READ_CONCURRENCY = 1;
+/** A cached, unexpired verdict for this model and window: a read that costs no call. */
+function layer1HistoryCached(model: string, window: string): boolean {
+    const key = createHash("sha256").update(model).update("\0").update(window).digest("hex");
+    const hit = layer1HistoryCache.get(key);
+    return hit !== undefined && hit.expiresAt > performance.now();
+}
+/** Tokens the classifier may generate (callLayer1's num_predict); they share
+ *  the context with the request. */
+export const LAYER1_CLASSIFIER_OUTPUT_TOKENS = 16;
+
+export type SecondReadOutcome =
+    | "cleared_9b" | "confirmed_9b" | "reserved_9b" | "error_9b"
+    | "reserved_4b_context" | "error_4b_context" | "deadline" | "budget";
+
+/** The 9b's second read of a conversation the 4b hedged on (see the call
+ *  site). Reads run from one queue — the first alone, then at most
+ *  LAYER1_SECOND_READ_CONCURRENCY in flight: the 9b's first (its prompt read, then turns newest first, then
+ *  context windows newest first — the reads most likely to refuse), the 4b's
+ *  context windows last. No
+ *  read starts after one that did not clear; a read already in flight is
+ *  awaited and the stronger of the two verdicts kept. Only an
+ *  OBVIOUS_NOT_RESERVED clears, and a clearance needs every read. Skipped, leaving the hedge,
+ *  when: the 9b is not installed; any text touches access control, deploy
+ *  safety or record exposure, or addresses the classifier
+ *  (secondReadExclusion); the prompt is oversize; the reads would exceed the
+ *  cap; the 9b does not fit in RAM (warm per a fresh /api/ps, or free RAM at
+ *  its floor); its context cannot be probed; or any classifier request might
+ *  not fit that context (bytes of the request as sent plus the template —
+ *  a truncated request is not a read of the text). The 9b's reads are cached
+ *  under its own model name; the 4b's context-window reads under the 4b's. */
+export async function layer1HedgeSecondRead(o: {
+    l1fn: NonNullable<InferDeps["callLayer1"]>;
+    args: PrismInferArgs;
+    installed: ReadonlySet<string>;
+    listLoaded: () => Promise<Set<string> | null>;
+    freeBytes: number;
+    ollamaUrl: string;
+    guardModel: string;
+    promptFastPath: boolean;
+    probeClassifierLimits: (url: string, model: string) => Promise<{ numCtx: number | null; overheadBound: number | null }>;
+    /** The pinned exclusion policy (inferencePolicy.ts); null means no second read. */
+    policy: SecondReadExclusionPolicy | null;
+    now?: () => number;
+    /** Tests only; LAYER1_SECOND_READ_DEADLINE_MS otherwise. */
+    deadlineMs?: number;
+    /** Tests only; LAYER1_SECOND_READ_CONCURRENCY otherwise. */
+    concurrency?: number;
+}): Promise<{ ran: boolean; model: string | null; verdict: Layer1Verdict; outcome: string; decidedBy?: string }> {
+    const now = o.now ?? (() => performance.now());
+    // The clock starts here, before the residency and limits probes.
+    const t0 = now();
+    const deadlineMs = o.deadlineMs ?? LAYER1_SECOND_READ_DEADLINE_MS;
+    const left = () => deadlineMs - (now() - t0);
+    const late = () => left() < 0;
+    const LATE = Symbol("late");
+    /** The promise, or LATE once the time left runs out, whichever is first. */
+    const inTime = <T>(p: Promise<T>): Promise<T | typeof LATE> => {
+        const ms = left();
+        if (ms < 0) { p.catch(() => {}); return Promise.resolve(LATE); }
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const out = new Promise<typeof LATE>(res => { timer = setTimeout(() => res(LATE), ms); });
+        return Promise.race([p, out]).finally(() => clearTimeout(timer));
+    };
+    const skip = (why: string) => ({ ran: false, model: null, verdict: "UNCERTAIN" as Layer1Verdict, outcome: `skipped_${why}` });
+    // Without the policy nothing is read or probed: the hedge stands.
+    if (!o.policy) return skip("no_policy");
+    const policy = o.policy;
+    const big = resolveOllamaName("prism-coder:9b", o.installed);
+    const tier = MODEL_TIERS.find(t => t.tag === "prism-coder:9b");
+    if (!o.installed.has(big) || big === o.guardModel || tier === undefined) return skip("no_9b");
+    const readPrompt = !o.promptFastPath;
+    const messages = o.args.messages ?? [];
+    const turnReads = messages.flatMap((m, index) => historyTurnWindows(m.content).filter(w => w.trim()).map(text => ({ text, index, role: m.role })));
+    const turnTexts = turnReads.map(t => t.text);
+    const ctxTexts = contextWindows(o.args).filter(w => w.trim());
+    // Every text as written AND every window as read: a window cut from a
+    // longer text can begin with a term its source hid (review 2026-09-25).
+    // The whole conversation goes along: decision words anywhere in it keep a
+    // "deploy script" excluded.
+    const conversation = [...messages.map(m => m.content), o.args.prompt].join("\n");
+    for (const t of [...messages.map(m => m.content), o.args.prompt, ...turnTexts, ...ctxTexts]) {
+        const excluded = secondReadExclusion(policy, t, conversation);
+        if (excluded) return skip(excluded);
+    }
+    if (readPrompt && o.args.prompt.length > MAX_CLASSIFIER_PROMPT_LENGTH) return skip("prompt_oversize");
+
+    type Read = { model: string; text: string; kind: "prompt" | "turn" | "context"; label: string };
+    const reads: Read[] = [];
+    const seen = new Set<string>();
+    const add = (r: Read) => { const k = `${r.model}\0${r.kind === "prompt" ? "\0prompt" : r.text}`; if (!seen.has(k)) { seen.add(k); reads.push(r); } };
+    if (readPrompt) add({ model: big, text: o.args.prompt, kind: "prompt", label: "9b:prompt" });
+    for (let i = turnReads.length - 1; i >= 0; i--) add({ model: big, text: turnReads[i].text, kind: "turn", label: `9b:turn:${turnReads[i].index}:${turnReads[i].role}` });
+    for (let i = ctxTexts.length - 1; i >= 0; i--) add({ model: big, text: ctxTexts[i], kind: "context", label: `9b:context:${i}` });
+    for (let i = ctxTexts.length - 1; i >= 0; i--) add({ model: o.guardModel, text: ctxTexts[i], kind: "context", label: `4b:context:${i}` });
+    // A prompt read is never cached; a window read is a call only on a miss.
+    const costs = (r: Read) => r.kind === "prompt" || !layer1HistoryCached(r.model, r.text);
+    if (reads.filter(costs).length > LAYER1_SECOND_READ_MAX_CALLS) return skip("over_cap");
+
+    let loadedNow: Set<string> | null = null;
+    const listed = await inTime(Promise.resolve().then(() => o.listLoaded()).catch(() => null));
+    if (listed === LATE) return { ran: true, model: big, verdict: "UNCERTAIN", outcome: "deadline" };
+    loadedNow = listed;
+    if (!loadedNow?.has(big) && o.freeBytes < tier.minFreeGb * 1024 ** 3) return skip("unaffordable");
+    // Both models must be able to read every request they are sent in full:
+    // the request's UTF-8 bytes (a byte-level BPE token covers at least one
+    // byte) plus that model's measured prompt overhead (its chat template, plus
+    // the empty system message callLayer1 sends in place of a SYSTEM baked
+    // into the Modelfile — the baked prompt itself is not sent, so it is not
+    // counted; see utils/ollamaSystemPrompt.ts)
+    // plus the classifier's output, within that model's runtime context
+    // (probeClassifierLimits). A truncated request is not a read of the
+    // text; anything unmeasured skips, and is measured again next time.
+    const quiet = async <T>(f: () => Promise<T>): Promise<T | null> => { try { return await f(); } catch { return null; } };
+    const limits = await inTime(Promise.all([
+        quiet(() => o.probeClassifierLimits(o.ollamaUrl, big)),
+        quiet(() => o.probeClassifierLimits(o.ollamaUrl, o.guardModel)),
+    ]));
+    if (limits === LATE) return { ran: true, model: big, verdict: "UNCERTAIN", outcome: "deadline" };
+    const [limBig, limSmall] = limits;
+    const ctxBig = limBig?.numCtx ?? null, overBig = limBig?.overheadBound ?? null;
+    const ctxSmall = limSmall?.numCtx ?? null, overSmall = limSmall?.overheadBound ?? null;
+    const known = (n: number | null): n is number => typeof n === "number" && Number.isFinite(n) && n > 0;
+    if (!known(ctxBig) || !known(ctxSmall) || !known(overBig) || !known(overSmall)) return skip("unprobeable");
+    const fitsIn = (ctx: number, over: number) => (t: string) =>
+        Buffer.byteLength(layer1ClassifierContent(t), "utf8") + over + LAYER1_CLASSIFIER_OUTPUT_TOKENS <= ctx;
+    if (![...turnTexts, ...(readPrompt ? [o.args.prompt] : []), ...ctxTexts].every(fitsIn(ctxBig, overBig))) return skip("unfit");
+    if (!ctxTexts.every(fitsIn(ctxSmall, overSmall))) return skip("unfit");
+
+    const budget = { calls: 0, consecutiveErrors: 0, tripped: false };
+    type Stop = { ran: true; model: string; verdict: Layer1Verdict; outcome: string; decidedBy?: string };
+    const stop = (verdict: Layer1Verdict, outcome: string, decidedBy?: string): Stop =>
+        ({ ran: true, model: big, verdict, outcome, ...(decidedBy ? { decidedBy } : {}) });
+    /** What a finished read decides, or null when it clears. The 9b must
+     *  clear outright; the 4b's refusal stands, a read it could not give
+     *  leaves the hedge, and its hedge is what the 9b is overturning. */
+    const judge = (r: Read, v: Layer1Verdict): Stop | null => {
+        if (budget.tripped) return stop("UNCERTAIN", "budget", r.label);
+        if (r.model === big) {
+            if (v === "OBVIOUS_NOT_RESERVED") return null;
+            return v === "OBVIOUS_RESERVED" ? stop(v, "reserved_9b", r.label)
+                : v === "ERROR" ? stop("UNCERTAIN", "error_9b", r.label)
+                : stop("UNCERTAIN", "confirmed_9b", r.label);
+        }
+        if (v === "OBVIOUS_RESERVED") return stop("OBVIOUS_RESERVED", "reserved_4b_context", r.label);
+        if (v === "ERROR") return stop("UNCERTAIN", "error_4b_context", r.label);
+        return null;
+    };
+    const stops: Stop[] = [];
+    let next = 0, calls = 0, halted = false;
+    const halt = (s: Stop) => { halted = true; stops.push(s); };
+    const worker = async (limit = Infinity) => {
+        for (let n = 0; n < limit && !halted && next < reads.length; n++) {
+            const r = reads[next++];
+            if (late()) { halt(stop("UNCERTAIN", "deadline")); return; }
+            // The call cap, counted as each read starts: a verdict cached at
+            // admission may have expired since.
+            if (costs(r) && ++calls > LAYER1_SECOND_READ_MAX_CALLS) { halt(stop("UNCERTAIN", "budget", r.label)); return; }
+            let pending: Promise<Layer1Verdict>;
+            if (r.kind === "prompt") {
+                if (++budget.calls > LAYER1_SCREEN_CALL_BUDGET) { budget.tripped = true; halt(stop("UNCERTAIN", "budget", r.label)); return; }
+                pending = o.l1fn(r.text, o.ollamaUrl, big, undefined, undefined, { deterministic: false });
+            } else {
+                pending = classifyHistoryWindow(o.l1fn, r.text, o.ollamaUrl, r.model, budget);
+            }
+            const v = await inTime(pending);
+            if (v === LATE) { halt(stop("UNCERTAIN", "deadline")); return; }
+            const decided = judge(r, v);
+            if (decided) { halt(decided); return; }
+        }
+    };
+    // The first read runs alone: it is the read most likely to refuse, and
+    // alone it answers in one read's time. Two in flight made each read slower
+    // and a refusal wait for the other read. The rest run paired.
+    await worker(1);
+    if (!halted) await Promise.all(Array.from({ length: Math.max(1, Math.min(o.concurrency ?? LAYER1_SECOND_READ_CONCURRENCY, reads.length - next)) }, () => worker()));
+    // A refusal from any read outranks another read's hedge, error or lateness.
+    const reserved = stops.find(s => s.verdict === "OBVIOUS_RESERVED");
+    if (reserved) return reserved;
+    if (stops.length > 0) return stops[0];
+    if (late()) return stop("UNCERTAIN", "deadline");
+    return stop("OBVIOUS_NOT_RESERVED", "cleared_9b");
+}
+
 async function classifyHistoryWindow(
     l1fn: NonNullable<InferDeps["callLayer1"]>,
     window: string,
@@ -1044,9 +1250,12 @@ export async function probeTemplateOverhead(
     const key = `${model}::${hasSystem}`;
     if (templateOverheadCache.has(key)) return templateOverheadCache.get(key) ?? null;
     try {
+        // Without a caller system, measure what callOllamaGenerate sends: an
+        // empty system message to a model that bakes a SYSTEM (so the baked
+        // prompt is not counted), nothing extra to one that does not.
         const messages = hasSystem
             ? [{ role: "system", content: "s" }, { role: "user", content: "x" }]
-            : [{ role: "user", content: "x" }];
+            : [...(await leadingSystemMessages(url, model, undefined)), { role: "user", content: "x" }];
         const res = await fetch(`${url}/api/chat`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -1067,6 +1276,189 @@ export async function probeTemplateOverhead(
         return n as number;
     } catch {
         templateOverheadCache.set(key, null);
+        return null;
+    }
+}
+
+/** Measured classifier overhead per model, successes only: a failure (a
+ *  cold model that did not load in time, Ollama down) is retried next time. */
+const classifierOverheadCache = new Map<string, number>();
+export function _resetClassifierLimitsForTest(): void { classifierOverheadCache.clear(); }
+/** Long enough for a cold 9b to load. The
+ *  second read loads the model on its first read anyway, so this moves that
+ *  wait rather than adding one. */
+export const CLASSIFIER_LIMITS_TIMEOUT_MS = 15_000;
+
+/**
+ * A classifier model's real limits, for the hedge second read:
+ *  - its prompt overhead, MEASURED — one request with a one-character prompt
+ *    shaped exactly as callLayer1 sends it (chat template, plus the empty
+ *    system message that replaces a SYSTEM baked into the Modelfile);
+ *  - its RUNTIME context, from Ollama's loaded-model list (/api/ps
+ *    context_length, which the measurement has just made current), else the
+ *    num_ctx pinned in its Modelfile (/api/show).
+ * History: probeTemplateOverhead (1.5 s limit, failures cached for the life
+ * of the process) switched the second read off for good on a cold model; the
+ * first replacement bounded the overhead by the template's source bytes
+ * (far above the real token count) and required a pinned num_ctx,
+ * which the published dcostenco/prism-coder:9b does not have — so no real
+ * install would ever have run a second read.
+ */
+export async function probeClassifierLimits(url: string, model: string): Promise<{ numCtx: number | null; overheadBound: number | null }> {
+    let overhead = classifierOverheadCache.get(model) ?? null;
+    if (overhead === null) {
+        try {
+            const res = await fetch(`${url}/api/chat`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    model,
+                    messages: [...(await leadingSystemMessages(url, model, undefined)), { role: "user", content: "x" }],
+                    stream: false, think: false,
+                    options: { num_predict: 1, temperature: 0 },
+                }),
+                signal: AbortSignal.timeout(CLASSIFIER_LIMITS_TIMEOUT_MS),
+                redirect: "error",
+            });
+            if (res.ok) {
+                const n = ((await res.json()) as { prompt_eval_count?: number }).prompt_eval_count;
+                if (typeof n === "number" && Number.isFinite(n) && n > 0) {
+                    overhead = n;
+                    classifierOverheadCache.set(model, n);
+                }
+            }
+        } catch { /* not measured: the caller skips, and the next call tries again */ }
+    }
+    let numCtx: number | null = null;
+    try {
+        const ps = await fetch(`${url}/api/ps`, { signal: AbortSignal.timeout(5_000), redirect: "error" });
+        if (ps.ok) {
+            const loaded = ((await ps.json()) as { models?: Array<{ name?: string; model?: string; context_length?: number }> }).models ?? [];
+            const hit = loaded.find(m => m.name === model || m.model === model);
+            if (typeof hit?.context_length === "number" && hit.context_length > 0) numCtx = hit.context_length;
+        }
+    } catch { /* fall back to the pinned value */ }
+    if (numCtx === null) numCtx = await probeNumCtx(url, model);
+    return { numCtx, overheadBound: overhead };
+}
+
+/** The local answer check's requests (answerGrounding.ts holds the mechanism, the
+ *  pinned artifact the rules; the HTTP lives here with the rest of prism's Ollama calls). */
+export async function groundAnswer(o: {
+    /** The pinned answer-check rules (inferencePolicy.ts). */
+    policy: AnswerCheckPolicy;
+    ollamaUrl: string;
+    model: string;
+    messages: readonly InferHistoryTurn[];
+    prompt: string;
+    answer: string;
+    images?: string[];
+    /** The context the request was sized for; a prompt evaluation at about half
+     *  of it is Ollama's context shift — the input was cut. */
+    numCtx?: number;
+    timeoutMs?: number;
+    fetchImpl?: typeof fetch;
+    /** Reasoning before the verdict (default ANSWER_GROUNDING_THINK); it needs its own token budget. */
+    think?: boolean;
+    outputTokens?: number;
+}): Promise<{ verdict: AnswerGroundingVerdict; reply: string; ms: number }> {
+    const t0 = Date.now();
+    const f = o.fetchImpl ?? fetch;
+    const think = o.think ?? ANSWER_GROUNDING_THINK;
+    const done = (verdict: AnswerGroundingVerdict, reply: string) => ({ verdict, reply: reply.slice(0, 80), ms: Date.now() - t0 });
+    const user: { role: "user"; content: string; images?: string[] } = { role: "user", content: answerGroundingContent(o.messages, o.prompt, o.answer) };
+    if (o.images?.length) user.images = o.images;
+    const base = [{ role: "system", content: o.policy.systemPrompt }, user];
+    /** One request. `retry` when a complete response arrived without a valid
+     *  verdict: reasoning that wrote none, a reply cut at the token limit, or a
+     *  word that is not PASS or FAIL ("yes" to a conversation that asked for
+     *  yes/no answers). Timeouts, network and server errors are not retried. */
+    const ask = async (withThinking: boolean, tokens: number, timeoutMs: number, messages: Array<Record<string, unknown>>): Promise<{ verdict: AnswerGroundingVerdict; reply: string; retry?: boolean; content?: string; thinking?: string }> => {
+        try {
+            const res = await f(`${o.ollamaUrl}/api/chat`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    model: o.model,
+                    messages,
+                    stream: false,
+                    think: withThinking,
+                    options: { num_predict: tokens, temperature: 0 },
+                }),
+                signal: AbortSignal.timeout(timeoutMs),
+                // The conversation must not follow a redirect off this machine.
+                redirect: "error",
+            });
+            if (!res.ok) return { verdict: "ERROR", reply: `http_${res.status}` };
+            const data = (await res.json()) as { message?: { content?: unknown; thinking?: unknown }; done?: unknown; done_reason?: unknown; error?: unknown; prompt_eval_count?: unknown };
+            if (data.error !== undefined) return { verdict: "ERROR", reply: "server_error" };
+            const content = typeof data.message?.content === "string" ? data.message.content : "";
+            if (data.done !== true) return { verdict: "ERROR", reply: `incomplete:${String(data.done)}` };
+            // Cut at the token limit (reasoning that used the budget): no verdict,
+            // worth one retry.
+            if (data.done_reason !== "stop") return { verdict: "ERROR", reply: `incomplete:${String(data.done_reason)}`, retry: true, content };
+            const n = data.prompt_eval_count;
+            if (o.numCtx && typeof n === "number" && Math.abs(n - o.numCtx / 2) <= 16 && answerGroundingBytes(o.policy, o.messages, o.prompt, o.answer) > o.numCtx / 2) {
+                return { verdict: "ERROR", reply: "context_shift" };
+            }
+            const thinking = typeof data.message?.thinking === "string" ? data.message.thinking : undefined;
+            // An empty reply after reasoning whose last line is the bare word: the
+            // model decided, in the wrong channel, and a retry without its reasoning
+            // could decide differently. Only the bare word counts; a quoted one
+            // ("PASS") may be the data it read.
+            const lastLine = !content.trim() && thinking ? (thinking.trim().split("\n").pop() ?? "").trim() : "";
+            const said = /^\**(PASS|FAIL)\**[.!]?$/i.test(lastLine) ? lastLine : content;
+            const verdict = parseGroundingVerdict(said);
+            return verdict === "ERROR" ? { verdict, reply: content, retry: true, content, thinking } : { verdict, reply: said, content: said, thinking };
+        } catch (err) {
+            const name = err instanceof Error ? err.name : "Error";
+            return { verdict: "ERROR", reply: name === "TimeoutError" || name === "AbortError" ? "timeout" : "network" };
+        }
+    };
+    const first = await ask(think, o.outputTokens ?? (think ? ANSWER_GROUNDING_THINK_TOKENS : ANSWER_GROUNDING_OUTPUT_TOKENS), o.timeoutMs ?? (think ? ANSWER_GROUNDING_TIMEOUT_MS : ANSWER_GROUNDING_RETRY_TIMEOUT_MS), base);
+    // Reasoning with wrong arithmetic, whether or not it reached a verdict, is
+    // asked once more with the correct figures computed here; the model still
+    // decides, reasoning again (without reasoning it may take the correction for
+    // the answer). It takes the retry's time limit, so the worst case stays that
+    // of the reminder path. Equations the conversation or the answer contains
+    // are theirs, not a slip.
+    const sources = [o.answer, o.prompt, ...o.messages.map(m => m.content)];
+    const slips = first.thinking ? arithmeticSlips(o.policy, first.thinking, sources) : [];
+    if (slips.length > 0) {
+        const correction = arithmeticCorrection(o.policy, slips);
+        if (correction === null) return done("ERROR", "arithmetic_unresolved:too_long");
+        const corrected = [...base, ...(first.content?.trim() ? [{ role: "assistant", content: first.content }] : []), { role: "user", content: correction }];
+        const again = await ask(think, o.outputTokens ?? (think ? ANSWER_GROUNDING_THINK_TOKENS : ANSWER_GROUNDING_OUTPUT_TOKENS), o.timeoutMs ?? ANSWER_GROUNDING_RETRY_TIMEOUT_MS, corrected);
+        // Still reasoning from a wrong figure ("6.5 + 7 = 12.5" after being told
+        // 13.5): that verdict is not a check.
+        if (again.thinking && arithmeticSlips(o.policy, again.thinking, sources).length > 0) return done("ERROR", `arithmetic_unresolved:${again.reply}`);
+        return done(again.verdict, `arithmetic_corrected:${again.reply}`);
+    }
+    if (!first.retry) return done(first.verdict, first.reply);
+    // One bounded retry, without reasoning, restating the task. It is shown
+    // what it wrote: the reply, or, when reasoning ended without the word, that
+    // reasoning ("the answer is passing" is a decision without the word), and
+    // then asked only for the word. Reasoning with an arithmetic slip never
+    // reaches here.
+    const reasoning = !first.content?.trim() && first.thinking?.trim() ? first.thinking : "";
+    const reminder = reasoning
+        ? [...base, { role: "assistant", content: reasoning }, { role: "user", content: o.policy.verdictOnly }]
+        : [...base, ...(first.content?.trim() ? [{ role: "assistant", content: first.content }] : []), { role: "user", content: o.policy.reminder }];
+    const second = await ask(false, ANSWER_GROUNDING_OUTPUT_TOKENS, ANSWER_GROUNDING_RETRY_TIMEOUT_MS, reminder);
+    return done(second.verdict, `retry:${second.reply}`);
+}
+
+/** The context a LOADED model is running with (/api/ps context_length), or null.
+ *  The grounding check is sized against it: the Modelfile or tier table can
+ *  say more than the runner was loaded with. */
+export async function probeLoadedContext(url: string, model: string): Promise<number | null> {
+    try {
+        const ps = await fetch(`${url}/api/ps`, { signal: AbortSignal.timeout(5_000), redirect: "error" });
+        if (!ps.ok) return null;
+        const loaded = ((await ps.json()) as { models?: Array<{ name?: string; model?: string; context_length?: number }> }).models ?? [];
+        const hit = loaded.find(m => m.name === model || m.model === model);
+        return typeof hit?.context_length === "number" && hit.context_length > 0 ? hit.context_length : null;
+    } catch {
         return null;
     }
 }
@@ -1121,8 +1513,13 @@ export async function callOllamaGenerate(
     history?: InferHistoryTurn[],
 ): Promise<{ ok: true; text: string; doneReason?: string; promptTokens?: number; completionTokens?: number } | { ok: false; reason: string }> {
     try {
-        const messages: Array<{ role: string; content: string; images?: string[] }> = [];
-        if (system) messages.push({ role: "system", content: system });
+        // The caller's system message, or — when there is none — an empty one
+        // for a model whose Modelfile bakes a SYSTEM, so the baked tool-routing
+        // prompt of prism-coder:2b/:4b cannot answer in the caller's place
+        // (see utils/ollamaSystemPrompt.ts). A model without one gets no system
+        // message, as before.
+        const messages: Array<{ role: string; content: string; images?: string[] }> =
+            [...(await leadingSystemMessages(url, model, system))];
         // Prior turns sit between the system message and the current turn, in
         // the model's own chat template — the form every installed tier read
         // correctly in the 2026-09-15 probes, including turns another tier wrote.
@@ -1204,7 +1601,7 @@ function makeReservedRefusal(
     attempts: Array<{ tier: string; reason: string }>,
     category: string | null = null,
     cloudWasAllowed = false,
-    ledger: { history_turns?: number; refusal_layer?: string } = {},
+    ledger: { history_turns?: number; refusal_layer?: string; layer1_second_read?: string } = {},
 ): ReservedRefusalError {
     // Ledger the refusal (fire-and-forget). No prompt content is persisted —
     // same HIPAA posture as the safety_gate exclusion. gate_outcome mirrors
@@ -1215,6 +1612,7 @@ function makeReservedRefusal(
         refusal_reason: "layer1_reserved",
         history_turns: ledger.history_turns,
         refusal_layer: ledger.refusal_layer,
+        layer1_second_read: ledger.layer1_second_read,
     });
     return new ReservedRefusalError(verdict, attempts, category, cloudWasAllowed);
 }
@@ -1346,6 +1744,84 @@ async function callSynaluxVerifier(opts: {
     return res.json() as Promise<GroundingOutcome>;
 }
 
+/** Verdict of the Synalux answer check. ERROR is any reply that is not a
+ *  verdict: HTTP error, timeout, network, a malformed or oversized body. */
+export type AnswerCheckVerdict = "PASS" | "FAIL" | "ERROR";
+/** Per request to the portal; the whole check, JWT exchange included, is
+ *  bounded by ANSWER_CHECK_DEADLINE_MS. */
+export const ANSWER_CHECK_TIMEOUT_MS = 12_000;
+export const ANSWER_CHECK_DEADLINE_MS = 20_000;
+/** Largest request sent: the portal's multi-turn caps with room for JSON. */
+export const ANSWER_CHECK_MAX_BODY_BYTES = 512 * 1024;
+const ANSWER_CHECK_MAX_REPLY_BYTES = 4_096;
+
+/**
+ * The Synalux confirmation of a local pass (POST /api/v1/prism/verify-answer).
+ * The caller sends a copy pseudonymized on this device (pseudonymize.ts), and
+ * only when cloud is allowed for the request and no image is attached. Synalux
+ * answers PASS or FAIL. Never throws: anything but a well-formed verdict is
+ * ERROR, which the caller treats as unchecked.
+ */
+export async function callSynaluxAnswerCheck(o: {
+    messages: readonly InferHistoryTurn[];
+    prompt: string;
+    answer: string;
+    timeoutMs?: number;
+    deadlineMs?: number;
+    fetchImpl?: typeof fetch;
+}): Promise<{ verdict: AnswerCheckVerdict; policy_version?: string; reason?: string }> {
+    const error = (reason: string) => ({ verdict: "ERROR" as const, reason });
+    if (!PRISM_SYNALUX_BASE_URL) return error("no_synalux_base_url");
+    const body = JSON.stringify({
+        messages: o.messages.map(m => ({ role: m.role, content: m.content })),
+        prompt: o.prompt,
+        answer: o.answer,
+    });
+    if (Buffer.byteLength(body, "utf8") > ANSWER_CHECK_MAX_BODY_BYTES) return error("request_too_large");
+    const f = o.fetchImpl ?? fetch;
+    const deadline = Date.now() + (o.deadlineMs ?? ANSWER_CHECK_DEADLINE_MS);
+    const left = () => deadline - Date.now();
+    // The JWT exchange takes no signal of its own; it races the same deadline.
+    const jwtWithin = async (): Promise<string | null> => {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const expired = new Promise<null>(resolve => { timer = setTimeout(() => resolve(null), Math.max(0, left())); });
+        try { return await Promise.race([getSynaluxJwt().catch(() => null), expired]); }
+        finally { clearTimeout(timer); }
+    };
+    const invoke = (jwt: string) => f(`${PRISM_SYNALUX_BASE_URL}/api/v1/prism/verify-answer`, {
+        method: "POST",
+        headers: { "Authorization": `Bearer ${jwt}`, "Content-Type": "application/json" },
+        body,
+        signal: AbortSignal.timeout(Math.max(1, Math.min(o.timeoutMs ?? ANSWER_CHECK_TIMEOUT_MS, left()))),
+        redirect: "error",
+    });
+    try {
+        let jwt = await jwtWithin();
+        if (!jwt) return error("jwt_unavailable");
+        let res = await invoke(jwt);
+        if (res.status === 401) {
+            invalidateSynaluxJwt();
+            jwt = await jwtWithin();
+            if (!jwt || left() <= 0) return error("jwt_refresh_failed");
+            res = await invoke(jwt);
+        }
+        if (!res.ok) return error(`http_${res.status}`);
+        const declared = Number(res.headers.get("content-length"));
+        if (Number.isFinite(declared) && declared > ANSWER_CHECK_MAX_REPLY_BYTES) return error("reply_too_large");
+        const text = await res.text();
+        if (Buffer.byteLength(text, "utf8") > ANSWER_CHECK_MAX_REPLY_BYTES) return error("reply_too_large");
+        const data = JSON.parse(text) as { verdict?: unknown; policy_version?: unknown };
+        if (data.verdict !== "PASS" && data.verdict !== "FAIL") return error("no_verdict");
+        return {
+            verdict: data.verdict,
+            policy_version: typeof data.policy_version === "string" ? data.policy_version.slice(0, 64) : undefined,
+        };
+    } catch (err) {
+        const name = err instanceof Error ? err.name : "";
+        return error(name === "TimeoutError" || name === "AbortError" ? "timeout" : "network");
+    }
+}
+
 export async function callSynaluxRouteGuard(opts: {
     prompt: string;
     draft: string;
@@ -1429,6 +1905,9 @@ export async function callSynaluxRouteGuard(opts: {
 
 export interface PrismInferResult {
     output: string;
+    /** On a refusal the caller can act on: what unlocks the request (a free
+     *  sign-in, or the plan page), for the host to show the user. */
+    next_step?: string;
     backend: string;
     model_picked: string | null;
     ram_free_mb: number;
@@ -1441,6 +1920,9 @@ export interface PrismInferResult {
     multi_turn?: MultiTurnEntitlement;
     /** How many prior turns this call carried (a count, never content). */
     history_turns?: number;
+    /** When the 4b screen hedged on a multi-turn call: what the 9b's second
+     *  read did (cleared_9b, confirmed_9b, reserved_9b, deadline, skipped_*). */
+    layer1_second_read?: string;
     /** Structural section census for clinical output. A COUNT, never a verdict:
      *  a section can be present and still be clinically wrong. Absent unless a
      *  clinical plan was requested. */
@@ -1509,8 +1991,20 @@ export interface InferDeps {
     probeNumCtx?: (url: string, model: string) => Promise<number | null>;
     /** Injectable template-overhead probe; defaults to probeTemplateOverhead. */
     probeTemplateOverhead?: typeof probeTemplateOverhead;
+    /** Injectable classifier-limits lookup for the hedge second read; defaults to probeClassifierLimits. */
+    probeClassifierLimits?: typeof probeClassifierLimits;
     /** Injectable Layer 1 classifier for testing. Defaults to callLayer1 from layer1.ts. */
     callLayer1?: (userPrompt: string, ollamaUrl: string, model: string, fetchImpl?: typeof fetch, images?: string[], opts?: { deterministic?: boolean }) => Promise<Layer1Verdict>;
+    /** Injectable local answer check for testing. Defaults to groundAnswer (the 9b on this device). */
+    groundAnswer?: (o: Parameters<typeof groundAnswer>[0]) => Promise<{ verdict: AnswerGroundingVerdict; reply?: string; ms?: number }>;
+    /** Injectable runtime-context lookup for the local check. Defaults to probeLoadedContext (/api/ps). */
+    probeLoadedContext?: (url: string, model: string) => Promise<number | null>;
+    /** Injectable answer-check rules for testing. Defaults to getAnswerCheckPolicy. */
+    answerCheckPolicy?: () => Promise<AnswerCheckPolicy | null>;
+    /** Injectable second-read exclusion policy for testing. Defaults to getSecondReadPolicy. */
+    secondReadPolicy?: () => Promise<SecondReadExclusionPolicy | null>;
+    /** Injectable Synalux confirmation of a local pass (pseudonymized). Defaults to callSynaluxAnswerCheck. */
+    checkAnswer?: (o: { messages: readonly InferHistoryTurn[]; prompt: string; answer: string }) => Promise<{ verdict: AnswerCheckVerdict; policy_version?: string; reason?: string }>;
 }
 
 /**
@@ -1725,12 +2219,19 @@ export async function runInfer(args: PrismInferArgs, deps: InferDeps): Promise<P
     const wantReport = args.escalation === "report";
     // Shared per-result entitlement metadata (§5.5) — spread into every
     // terminal result so callers can audit which plan/provenance applied.
-    const entMeta = {
+    const entMeta: {
+        readonly plan: typeof ent.plan;
+        readonly entitlements_source: typeof entSource;
+        readonly multi_turn: ReturnType<typeof multiTurnPolicy>;
+        readonly history_turns: number;
+        /** What the 9b's second read did, when one was considered (ledgered). */
+        layer1_second_read?: string;
+    } = {
         plan: ent.plan,
         entitlements_source: entSource,
         multi_turn: multiTurnPolicy(ent),
         history_turns: args.messages?.length ?? 0,
-    } as const;
+    };
     // Which screen layer decided the call; ledgered on a refusal. Bookkeeping
     // only: raise() is worseLayer1Verdict with a label and the assignment stays
     // at the call site, so it changes no outcome. Declared here because
@@ -1738,10 +2239,19 @@ export async function runInfer(args: PrismInferArgs, deps: InferDeps): Promise<P
     // layer refused this" needs a transcript replay — exactly what a benign
     // production refusal cost on 2026-09-16.
     let l1Layer: string | null = null;
-    const ledgerMeta = () => ({ history_turns: args.messages?.length ?? 0, refusal_layer: l1Layer ?? undefined });
+    const ledgerMeta = () => ({ history_turns: args.messages?.length ?? 0, refusal_layer: l1Layer ?? undefined, layer1_second_read: entMeta.layer1_second_read });
+    // Every stage that returned UNCERTAIN, not only the first to raise: the
+    // 9b second read may overturn a hedge only when every hedge came from a
+    // model read (see layer1HedgeSecondRead).
+    const hedgedBy = new Set<string>();
+    // Every stage where the 4b could not answer: the second read never runs
+    // then, or the 9b would be the only model to read that text alone.
+    const erredBy = new Set<string>();
     const raise = (cur: Layer1Verdict, next: Layer1Verdict, source: string): Layer1Verdict => {
         const merged = worseLayer1Verdict(cur, next);
         if (merged !== cur) l1Layer = source;
+        if (next === "UNCERTAIN") hedgedBy.add(source);
+        if (next === "ERROR") erredBy.add(source);
         return merged;
     };
     const refusedResult = (reason: string): PrismInferResult => ({
@@ -1756,6 +2266,20 @@ export async function runInfer(args: PrismInferArgs, deps: InferDeps): Promise<P
         gate_outcome: { status: "refused", reason, served_anyway: false },
         refusal_layer: l1Layer ?? undefined,
     });
+    /** A local answer to a conversation that the answer check rejected
+     *  (answer_ungrounded) or that was not checked (answer_unverified), with no
+     *  cloud answer instead: withheld, never served as answer text. A warning in
+     *  the text would not meet the failure contract (a host showing raw text
+     *  shows it anyway). */
+    const withheldAnswer = (reason: "answer_ungrounded" | "answer_unverified"): PrismInferResult => {
+        if (wantReport) return refusedResult(reason);
+        const why = reason === "answer_ungrounded" ? "did not match the conversation" : "could not be checked against the conversation";
+        const e = new Error(`prism_infer: the local answer ${why} and was withheld; no cloud answer was available. `
+            + `attempts=${JSON.stringify(attempts)}`);
+        (e as unknown as { attempts: typeof attempts; refusal_reason: string }).attempts = attempts;
+        (e as unknown as { refusal_reason: string }).refusal_reason = reason;
+        throw e;
+    };
 
     debugLog(
         `[prism_infer] plan=${ent.plan} ceiling=${effectiveCeiling} max_tokens=${maxTokens} ` +
@@ -1770,14 +2294,21 @@ export async function runInfer(args: PrismInferArgs, deps: InferDeps): Promise<P
         const chars = args.messages.reduce((n, t) => n + t.content.length, 0);
         if (!policy.enabled) {
             attempts.push({ tier: "entitlements", reason: "multi_turn_not_in_plan" });
-            if (wantReport) return refusedResult("multi_turn_not_in_plan");
+            // What unlocks it: with no account, a free sign-in; otherwise the plan page.
+            const nextStep = entSource === "unconfigured"
+                ? "Sign in with a free Synalux account: run `prism dashboard` and sign in under Account."
+                : `Upgrade: ${ent.upgrade_url}`;
+            if (wantReport) return { ...refusedResult("multi_turn_not_in_plan"), next_step: nextStep };
             // A portal outage assumes free-plan limits; say so instead of
             // telling a paying customer to upgrade (review 2026-09-16).
-            const why = entSource === "fallback_free"
-                ? "the Synalux portal was unreachable, so free-plan limits are assumed " +
-                  "(entitlements_source=fallback_free); retry when it is back"
+            if (entSource === "fallback_free") {
+                throw new Error("prism_infer: the Synalux portal was unreachable, so free-plan limits are assumed " +
+                    "(entitlements_source=fallback_free); retry when it is back, or send a single prompt.");
+            }
+            const why = entSource === "unconfigured"
+                ? "multi-turn history needs a Synalux account (a free one is enough)"
                 : `multi-turn history is not included in the ${ent.plan} plan`;
-            throw new Error(`prism_infer: ${why}. Send a single prompt, or upgrade: ${ent.upgrade_url}`);
+            throw new Error(`prism_infer: ${why}. Send a single prompt, or: ${nextStep}`);
         }
         if (turns > policy.max_turns || chars > policy.max_chars) {
             attempts.push({ tier: "entitlements", reason: "history_over_plan_cap" });
@@ -1788,6 +2319,9 @@ export async function runInfer(args: PrismInferArgs, deps: InferDeps): Promise<P
                 `(a brief, not a transcript); nothing was trimmed for you.`,
             );
         }
+        // Loaded ahead of the screen, which may need it; a failure is only "no second read".
+        void (deps.secondReadPolicy ?? getSecondReadPolicy)().catch(() => null);
+        void (deps.answerCheckPolicy ?? getAnswerCheckPolicy)().catch(() => null);
     }
 
     // Log tier enforcement to Datadog for monetization visibility
@@ -1869,9 +2403,11 @@ export async function runInfer(args: PrismInferArgs, deps: InferDeps): Promise<P
         if (wouldVerify) attempts.push({ tier: "verifier", reason: "verifier_skipped_images_stay_local" });
         gatedArgs = { ...gatedArgs, route_guard: "local" as const, verify: false };
     }
+    let secondReadModel: string | null = null;
     if (installed) {
         const l1fn = deps.callLayer1 ?? defaultCallLayer1;
         const l1Model = resolveOllamaName("prism-coder:4b", installed);
+        secondReadModel = null;
         // The classifier must be able to SEE what it is classifying. Ollama
         // accepts `images` on a text-only model and silently ignores them
         // (measured 2026-08-14), so passing them is not enough — a blind
@@ -2025,6 +2561,53 @@ export async function runInfer(args: PrismInferArgs, deps: InferDeps): Promise<P
             if (budget.consecutiveErrors >= LAYER1_SCREEN_ERROR_BREAKER) {
                 attempts.push({ tier: "layer1", reason: `layer1_screen_error_breaker:${LAYER1_SCREEN_ERROR_BREAKER}` });
             }
+            // 4. A hedge the 9b may overturn. The 4b screen above is unchanged
+            // and decides every conversation it clears or refuses; only when its
+            // final word is a model's UNCERTAIN (never the budget or breaker,
+            // never an image request) does the 9b read the conversation again:
+            // every turn alone, the prompt, every context window, with the 4b
+            // reading the context windows it skipped after hedging. The hedge is
+            // overturned only if every 9b read clears and no 4b read refuses;
+            // any 9b hedge, refusal, error or budget trip leaves the hedge where
+            // it was. The two models err differently: the 4b hedges on benign
+            // follow-ups the 9b clears, and the 9b refuses some statements the
+            // 4b reads clean; the 4b also refuses some turns the 9b would clear,
+            // which is why a 4b refusal is never re-read. A conversation the 4b
+            // clears or refuses costs exactly what it did.
+            const modelHedgeOnly = l1 === "UNCERTAIN" && (resolvedImages?.length ?? 0) === 0 && hedgedBy.size > 0
+                && [...hedgedBy].every(s => s === "isolated" || s === "prompt" || s === "context");
+            if (modelHedgeOnly && erredBy.size > 0) {
+                // A read the 4b could not answer is not a hedge the 9b may overturn.
+                attempts.push({ tier: "layer1", reason: "layer1_hedge_second_read_skipped_classifier_error" });
+                entMeta.layer1_second_read = "skipped_classifier_error";
+            } else if (modelHedgeOnly) {
+                const second = await layer1HedgeSecondRead({
+                    l1fn, args, installed, listLoaded: deps.listLoaded, freeBytes: deps.freemem(), ollamaUrl: deps.ollamaUrl,
+                    guardModel: l1Model, promptFastPath,
+                    probeClassifierLimits: deps.probeClassifierLimits ?? probeClassifierLimits,
+                    policy: await (deps.secondReadPolicy ?? getSecondReadPolicy)().catch(() => null),
+                });
+                entMeta.layer1_second_read = second.outcome;
+                if (!second.ran) {
+                    attempts.push({ tier: "layer1", reason: `layer1_hedge_second_read_${second.outcome}` });
+                } else {
+                    attempts.push({ tier: "layer1", reason: "layer1_hedge_second_read_9b" });
+                    // The read that decided, for the audit trail: the first
+                    // pass's hedge is only what started the second read.
+                    if (second.decidedBy) attempts.push({ tier: "layer1", reason: `layer1_hedge_decided:${second.decidedBy}` });
+                    secondReadModel = second.model;
+                    if (second.verdict === "OBVIOUS_RESERVED") {
+                        l1 = raise(l1, "OBVIOUS_RESERVED", "second_read");
+                        attempts.push({ tier: "layer1", reason: `layer1_hedge_${second.outcome}` });
+                    } else if (second.verdict === "OBVIOUS_NOT_RESERVED") {
+                        l1 = second.verdict;
+                        l1Layer = null;
+                        attempts.push({ tier: "layer1", reason: "layer1_hedge_cleared_9b" });
+                    } else {
+                        attempts.push({ tier: "layer1", reason: `layer1_hedge_${second.outcome}` });
+                    }
+                }
+            }
         }
         // Null when the deterministic floor did not fire — the verdict then came
         // from the semantic classifier, which has no per-rule attribution.
@@ -2172,10 +2755,23 @@ export async function runInfer(args: PrismInferArgs, deps: InferDeps): Promise<P
     }
     // ── end Layer 1 ─────────────────────────────────────────────────────────
 
+    // A second read ran the 9b after free RAM and the warm set were read
+    // above (and may have loaded it, or found it unloaded since); eviction and
+    // the tier RAM gate below must see the machine as it is now. Every other
+    // path keeps the one snapshot.
+    let genLoaded = loaded;
+    let genFreeBytes = freeBytes;
+    if (secondReadModel !== null) {
+        genLoaded = await deps.listLoaded();
+        genFreeBytes = deps.freemem();
+    }
+
     // Walk the tier table top → bottom, capped by model_ceiling. Each tier
     // logs its skip reason ("not_pulled" / "ram_insufficient" / fail reason)
     // so the caller can see exactly why each tier was bypassed.
     let localDraft: { output: string; tier: string; gateReason?: string; promptTokens?: number; completionTokens?: number } | null = null;
+    // A local answer to a conversation the answer check rejected or did not check: never served as answer text.
+    let withheldReason: "answer_ungrounded" | "answer_unverified" | null = null;
 
     if (installed) {
         // F4 fix: guard ceiling-not-found — Math.max(0,-1) silently targets tier 0 (27b).
@@ -2190,12 +2786,12 @@ export async function runInfer(args: PrismInferArgs, deps: InferDeps): Promise<P
         // Operates only on prism tier models — never evicts arbitrary Ollama models
         // the caller doesn't own (F1). Uses an in-process mutex to prevent a
         // concurrent request from evicting a model mid-inference (F3).
-        let freeAfterEvict = freeBytes;
-        if (loaded && loaded.size > 0) {
+        let freeAfterEvict = genFreeBytes;
+        if (genLoaded && genLoaded.size > 0) {
             const ceilTier = MODEL_TIERS[ceilIdx >= 0 ? ceilIdx : 0];
             const ceilName = ceilTier ? resolveOllamaName(ceilTier.tag, installed) : null;
             const ceilInstalled = ceilName ? installed.has(ceilName) : false;
-            const ceilWarm = ceilName ? loaded.has(ceilName) : false;
+            const ceilWarm = ceilName ? genLoaded.has(ceilName) : false;
             // Do not clear the decks for a tier the walk is going to skip.
             //
             // Eviction runs BEFORE the tier walk and assumes the ceiling tier is
@@ -2233,12 +2829,12 @@ export async function runInfer(args: PrismInferArgs, deps: InferDeps): Promise<P
                 // F1 fix: only count and evict prism tier models — not arbitrary warm models.
                 const tierModelsToEvict = MODEL_TIERS
                     .map(t => resolveOllamaName(t.tag, installed))
-                    .filter(name => loaded.has(name));
+                    .filter(name => genLoaded.has(name));
                 const tierWarmBytes = tierModelsToEvict.reduce((sum, name) => {
                     const t = MODEL_TIERS.find(t => resolveOllamaName(t.tag, installed) === name);
                     return sum + (t ? t.weightsGb * 1024 ** 3 : 0);
                 }, 0);
-                if (freeBytes + tierWarmBytes >= ceilTier.minFreeGb * 1024 ** 3) {
+                if (genFreeBytes + tierWarmBytes >= ceilTier.minFreeGb * 1024 ** 3) {
                     // F3 fix: hold eviction mutex so no concurrent request evicts a model
                     // that another in-flight inference is actively using.
                     const released = await _evictionMutex.acquire();
@@ -2356,7 +2952,7 @@ export async function runInfer(args: PrismInferArgs, deps: InferDeps): Promise<P
             }
             // RAM gate — but skip the check if the tier is already warm in
             // Ollama. Reused models don't reallocate weight buffers.
-            const isWarm = loaded.has(ollamaName);
+            const isWarm = genLoaded.has(ollamaName);
             if (!isWarm && freeAfterEvict < tier.minFreeGb * (1024 ** 3)) {
                 attempts.push({ tier: tier.tag, reason: "ram_insufficient" });
                 continue;
@@ -2691,13 +3287,96 @@ export async function runInfer(args: PrismInferArgs, deps: InferDeps): Promise<P
                         break;
                     }
                 }
+                // A local answer to a conversation that is served as prose (chat,
+                // code, route plain text; a route tool call keeps its own
+                // contract) is served only when it passes the local answer check:
+                // the pinned rules, run on this device by the model that answered.
+                // When cloud is allowed for the request and no image is attached, a
+                // local pass is also confirmed by Synalux on a pseudonymized copy
+                // (identifiers replaced on this device); otherwise the local pass
+                // stands and nothing leaves the device. A failed or unchecked answer
+                // (form gate failed, no rules, too large for the model, the check or
+                // the confirmation fails it or gives no verdict) goes to the cloud
+                // when allowed, else it is withheld: none is served, or kept as a
+                // draft to serve if the cloud call fails. Single prompts are not
+                // checked.
+                if ((args.messages?.length ?? 0) > 0 && (mode !== "route" || routeServesProse(output))) {
+                    let outcome: "pass" | "ungrounded" | "unverified";
+                    if (!gate.pass) {
+                        attempts.push({ tier: tier.tag, reason: `quality_gate:${gate.reason}` });
+                        attempts.push({ tier: tier.tag, reason: "answer_check:form" });
+                        outcome = "unverified";
+                    } else {
+                        const policy = await (deps.answerCheckPolicy ?? getAnswerCheckPolicy)().catch(() => null);
+                        let local: AnswerGroundingVerdict | "UNFIT" | "NO_POLICY";
+                        if (!policy) {
+                            local = "NO_POLICY";
+                        } else {
+                            // Sized in bytes (never fewer than the text's tokens) against the
+                            // context the loaded model actually has, plus the measured template
+                            // overhead, the reasoning budget and the one follow-up turn: a
+                            // request Ollama truncates would let the check pass an answer
+                            // against a conversation it only partly read.
+                            const runtimeCtx = await (deps.probeLoadedContext ?? probeLoadedContext)(deps.ollamaUrl, ollamaName).catch(() => null);
+                            const checkCtx = runtimeCtx ?? effectiveCtx;
+                            const overhead = (await Promise.resolve((deps.probeTemplateOverhead ?? probeTemplateOverhead)(deps.ollamaUrl, ollamaName, true)).catch(() => null)) ?? MAX_TEMPLATE_OVERHEAD;
+                            const need = answerGroundingBytes(policy, args.messages ?? [], args.prompt, output)
+                                + estimateImageTokens(resolvedImages?.length ?? 0) + overhead
+                                + (ANSWER_GROUNDING_THINK ? ANSWER_GROUNDING_THINK_TOKENS : ANSWER_GROUNDING_OUTPUT_TOKENS)
+                                + ANSWER_GROUNDING_FOLLOW_UP_TOKENS;
+                            local = need > checkCtx
+                                ? "UNFIT"
+                                : (await (deps.groundAnswer ?? groundAnswer)({
+                                    policy, ollamaUrl: deps.ollamaUrl, model: ollamaName, messages: args.messages ?? [], prompt: args.prompt,
+                                    answer: output, images: resolvedImages?.length ? resolvedImages : undefined, numCtx: checkCtx,
+                                }).catch(() => ({ verdict: "ERROR" as const }))).verdict;
+                        }
+                        attempts.push({ tier: tier.tag, reason: `answer_check:local_${local.toLowerCase()}` });
+                        if (local === "UNGROUNDED") {
+                            outcome = "ungrounded";
+                        } else if (local !== "GROUNDED") {
+                            outcome = "unverified";
+                        } else if (!allowCloud || !canVerify || resolvedImages?.length) {
+                            // No confirmation: cloud off, a plan without the verifier
+                            // (a free account), or an image, which stays on the device.
+                            outcome = "pass";
+                        } else {
+                            const copy = pseudonymizeForCheck(args.messages ?? [], args.prompt, output);
+                            if (!copy.sendable) {
+                                // Text the pseudonymizer cannot read is not sent: the local pass
+                                // stands, as it does when cloud is off.
+                                attempts.push({ tier: tier.tag, reason: "answer_check:confirm_not_sendable" });
+                                outcome = "pass";
+                            } else {
+                                const confirm = (await (deps.checkAnswer ?? callSynaluxAnswerCheck)({ messages: copy.messages, prompt: copy.prompt, answer: copy.answer })
+                                    .catch(() => ({ verdict: "ERROR" as const }))).verdict;
+                                attempts.push({ tier: tier.tag, reason: `answer_check:confirm_${confirm.toLowerCase()}` });
+                                outcome = confirm === "PASS" ? "pass" : confirm === "FAIL" ? "ungrounded" : "unverified";
+                            }
+                        }
+                    }
+                    // An image never goes to the cloud, so a failed answer with one is withheld here.
+                    if (outcome !== "pass" && resolvedImages?.length) {
+                        attempts.push({ tier: tier.tag, reason: `answer_withheld:${outcome}` });
+                        return withheldAnswer(`answer_${outcome}`);
+                    }
+                    if (outcome !== "pass") gate = { pass: false, reason: outcome };
+                }
                 if (!gate.pass && allowCloud) {
                     debugLog(`[prism_infer] quality gate FAIL (${gate.reason}) — escalating to cloud`);
                     attempts.push({ tier: tier.tag, reason: `quality_gate:${gate.reason}` });
-                    if (gate.reason === "hard_truncation" || gate.reason === "loop_detected") {
+                    // Kept so a failed cloud call still serves it, marked degraded.
+                    // An answer grounding rejected or could not check is not kept: it is never served.
+                    // Nor is any draft of a conversation's answer, whatever its shape.
+                    if ((args.messages?.length ?? 0) === 0 && (gate.reason === "hard_truncation" || gate.reason === "loop_detected")) {
                         localDraft = { output, tier: tier.tag, gateReason: gate.reason, promptTokens: result.promptTokens, completionTokens: result.completionTokens };
                     }
+                    if (gate.reason === "ungrounded" || gate.reason === "unverified") withheldReason = `answer_${gate.reason}`;
                     break;
+                }
+                if (!gate.pass && (gate.reason === "ungrounded" || gate.reason === "unverified")) {
+                    attempts.push({ tier: tier.tag, reason: `answer_withheld:${gate.reason}` });
+                    return withheldAnswer(`answer_${gate.reason}`);
                 }
                 if (!gate.pass) {
                     // §5.2: this served-anyway path used to be silent — the result
@@ -2770,6 +3449,10 @@ export async function runInfer(args: PrismInferArgs, deps: InferDeps): Promise<P
     }
 
     // Cloud also failed — serve the local draft if we have one
+    if (withheldReason) {
+        attempts.push({ tier: "grounding", reason: `answer_withheld:${withheldReason.replace("answer_", "")}` });
+        return withheldAnswer(withheldReason);
+    }
     if (localDraft) {
         debugLog(`[prism_infer] cloud failed, serving gate-failed local draft from ${localDraft.tier}`);
         return await applyVerification(localDraft.output, gatedArgs, deps, {
@@ -2886,6 +3569,10 @@ async function applyVerification(
 
     // L1 output safety — intercept dangerous model-generated content
     const safeDraft = checkOutputSafety(routedDraft);
+    // A grounded answer that something later replaces is no longer the checked
+    // text: say so in the audit trail (review 2026-09-25).
+    const grounded = partial.attempts?.some(a => a.reason === "answer_check:local_grounded") ?? false;
+    if (grounded && safeDraft !== routedDraft) partial.attempts.push({ tier: "output_safety", reason: "answer_check:replaced_by_output_safety" });
 
     const shouldVerify = args.verify ?? (args.evidence !== undefined && args.evidence.length > 0);
     if (!shouldVerify || !deps.callVerifier) {
@@ -2899,6 +3586,7 @@ async function applyVerification(
         timeoutMs: args.verifier_timeout_ms,
         ollamaUrl: deps.ollamaUrl,
     });
+    if (grounded && outcome.finalText !== routedDraft) partial.attempts.push({ tier: "verifier", reason: "answer_check:replaced_by_verifier" });
     return {
         ...routedPartial,
         output: checkOutputSafety(outcome.finalText),
@@ -3099,6 +3787,9 @@ export async function prismInferHandler(args: unknown): Promise<{
             content: [
                 { type: "text", text: header },
                 { type: "text", text: result.output },
+                // What unlocks a refused request (a free sign-in, or the plan page),
+                // for the host to show the user.
+                ...(result.next_step ? [{ type: "text" as const, text: `Next step: ${result.next_step}` }] : []),
             ],
         };
     } catch (err) {

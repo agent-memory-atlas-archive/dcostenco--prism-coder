@@ -34,6 +34,8 @@
  * bypass, never a recursion guard).
  */
 
+import { leadingSystemMessages } from "./ollamaSystemPrompt.js";
+
 export type Layer1Verdict =
     | "OBVIOUS_RESERVED"
     | "OBVIOUS_NOT_RESERVED"
@@ -65,6 +67,15 @@ UNCERTAIN — if the request touches reserved vocabulary but the task is non-sec
 Request: "{prompt}"
 
 Answer (one word):`;
+
+/** The classifier request for `input`: the policy with the input in place of
+ *  `{prompt}`, LITERALLY. A string replacement expands `$\``, `$'`, `$&` and
+ *  `$$` in the replacement text, so a turn containing them spliced policy text
+ *  into the request where the user's words belong, and the request came out
+ *  longer than the text it was built from. */
+export function layer1ClassifierContent(input: string): string {
+    return LAYER1_PROMPT.replace("{prompt}", () => input);
+}
 
 const VALID: ReadonlySet<string> = new Set([
     "OBVIOUS_RESERVED",
@@ -402,6 +413,41 @@ const LAYER1_RETRY_TIMEOUT_MS = 5_000;
 // Not sufficient alone (adversaries can paraphrase), but as an ERROR-path
 // floor they block the obvious cases that padding/injection attacks
 // would otherwise smuggle through.
+/**
+ * The second read's exclusion policy, compiled (inferencePolicy.ts loads it:
+ * served by Synalux, pinned by hash). A text it excludes is never re-read by
+ * the 9b after a 4b hedge; the hedge stands.
+ */
+export interface SecondReadExclusionPolicy {
+    /** Operational content: access, sign-in, deploy safety, record exposure. */
+    operational: RegExp;
+    /** The classifier's own labels, as it writes them. */
+    classifierLabels: RegExp;
+    /** Text addressed to the classifier. */
+    classifierDirected: RegExp;
+    deployTerm: RegExp;
+    /** Global: each match is blanked before the deploy term is looked for again. */
+    deployScriptNoun: RegExp;
+    deployDecision: RegExp;
+}
+/** A deploy script named as a thing is exempt only while nothing in the whole
+ *  conversation reads as a decision; any other use of the deploy term excludes.
+ *  The absence of decision words is not a clearance: it only lets the models
+ *  read the conversation again. */
+function deployExcludes(p: SecondReadExclusionPolicy, text: string, conversation: string): boolean {
+    if (!p.deployTerm.test(text)) return false;
+    if (p.deployTerm.test(text.replace(p.deployScriptNoun, " "))) return true;
+    return p.deployDecision.test(text) || p.deployDecision.test(conversation);
+}
+/** Why the second read may not run on `text`, or null. `conversation`: every
+ *  turn and the prompt, joined; decision words anywhere in it keep a deploy
+ *  script excluded. Defaults to the text alone. */
+export function secondReadExclusion(policy: SecondReadExclusionPolicy, text: string, conversation: string = text): "operational_domain" | "classifier_directed" | null {
+    if (policy.classifierLabels.test(text) || policy.classifierDirected.test(text)) return "classifier_directed";
+    if (policy.operational.test(text) || deployExcludes(policy, text, conversation)) return "operational_domain";
+    return null;
+}
+
 const RESERVED_KEYWORDS = /\b(restrain\w*|seclu(?:sion|d\w*)|physical\s*holds?|(?:prone|supine|basket|therapeutic|manual|two[- ]?person)\s+holds?|hold(?:ing)?\s+(?:the\s+)?(?:client|child|student|patient)\s+down|containment|self[- ]?harm\w*|suicid\w*|overdos\w*|dos(?:age|ing)\s*(?:mg|schedule)|crisis\s*de[- ]?escalation|meltdown\s*management|rage\s+episode|elopement\s*incident)\b/i;
 
 /**
@@ -499,6 +545,15 @@ export async function callLayer1(
     }
     const classifierInput = oversize ? buildOversizeExcerpt(userPrompt) : userPrompt;
 
+    // A SYSTEM baked into the classifier model's Modelfile must not sit in front
+    // of LAYER1_PROMPT. prism-coder:4b bakes a tool-routing prompt; with it the
+    // private eval gate failed 5/5 runs (two hard negatives refused every run),
+    // and with it replaced by an empty system message the gate passed 5/5 with
+    // reserved recall unchanged (see ollamaSystemPrompt.ts). Looked up once per
+    // call, and only here, where a model request is certain.
+    let leadP: Promise<Array<{ role: "system"; content: string }>> | undefined;
+    const lead = () => (leadP ??= leadingSystemMessages(ollamaUrl, model, undefined, fetchImpl));
+
     const classify = async (timeoutMs: number): Promise<Layer1Verdict> => {
         let res: Response;
         try {
@@ -508,9 +563,10 @@ export async function callLayer1(
                 body: JSON.stringify({
                     model,
                     messages: [
+                        ...(await lead()),
                         {
                             role: "user",
-                            content: LAYER1_PROMPT.replace("{prompt}", classifierInput),
+                            content: layer1ClassifierContent(classifierInput),
                             ...(images?.length ? { images } : {}),
                         },
                     ],
@@ -642,7 +698,7 @@ export async function callLayer1(
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
                     model,
-                    messages: [{ role: "user", content: IMAGE_CONTENT_SCREEN, images: batch }],
+                    messages: [...(await lead()), { role: "user", content: IMAGE_CONTENT_SCREEN, images: batch }],
                     stream: false,
                     think: false,
                     options: { num_predict: 8, temperature: 0 },

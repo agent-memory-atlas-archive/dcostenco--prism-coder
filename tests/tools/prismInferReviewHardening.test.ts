@@ -3,6 +3,7 @@
  * failed on the code it guards before the fix landed.
  */
 import { describe, it, expect, vi, beforeEach, afterAll } from "vitest";
+import { passingAnswerCheck } from "../fixtures/answerCheckPolicy.js";
 import {
     runInfer,
     VISION_SYSTEM_PROMPT,
@@ -42,7 +43,7 @@ const ENT: PrismEntitlements = {
     max_tokens: 4096,
     max_seats: 25,
     multi_turn: { enabled: true, max_turns: 30, max_chars: 96_000 },
-    features: { cloud_fallback: false, grounding_verifier: false, knowledge_search_unlimited: true, session_memory_unlimited: true, analytics_dashboard: true },
+    features: { cloud_fallback: true, grounding_verifier: true, knowledge_search_unlimited: true, session_memory_unlimited: true, analytics_dashboard: true },
     upgrade_url: "https://synalux.ai/pricing",
 };
 beforeEach(() => { _setCacheForTest(ENT, 60_000); _resetLayer1HistoryCacheForTest(); });
@@ -59,6 +60,7 @@ function deps(overrides: Partial<InferDeps> = {}): InferDeps {
         callCloud: vi.fn(async () => ({ ok: false as const, reason: "no_cloud" })),
         ollamaUrl: "http://x",
         callLayer1: vi.fn(async () => "OBVIOUS_NOT_RESERVED" as const),
+        ...passingAnswerCheck,   // the answer check has its own tests (answerCheck.test.ts); here it passes
         ...overrides,
     } as InferDeps;
 }

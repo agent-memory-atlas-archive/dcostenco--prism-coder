@@ -202,6 +202,7 @@ export function recordInference(result: {
      *  are queries, not transcript archaeology (2026-09-16). */
     history_turns?: number;
     refusal_layer?: string;
+    layer1_second_read?: string;
 }): void {
     if (result.backend === "safety_gate") return;
 
@@ -229,6 +230,7 @@ export function recordInference(result: {
         ram_free_mb: result.ram_free_mb,
         history_turns: result.history_turns,
         refusal_layer: result.refusal_layer,
+        layer1_second_read: result.layer1_second_read,
     });
 
     // §5.2: refused results (escalation:"report") get a ledger row above but

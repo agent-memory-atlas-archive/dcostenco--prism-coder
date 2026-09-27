@@ -1,5 +1,6 @@
 import type * as http from "node:http";
 import { invalidateEntitlements } from "../utils/entitlements.js";
+import { clearInferencePolicies } from "../utils/inferencePolicy.js";
 import { getSynaluxJwt, invalidateSynaluxJwt } from "../utils/synaluxJwt.js";
 import { resolvePortalBaseUrl, usablePortalKey } from "../utils/synaluxSearch.js";
 import { isSynaluxSignedOut, setSynaluxSignedOut } from "../utils/synaluxCredentialState.js";
@@ -38,6 +39,9 @@ export interface DashboardAccount {
   role_key: string | null;
   plan: "free" | "standard" | "advanced" | "enterprise";
   subscription_plan?: "standard" | "advanced" | "enterprise" | null;
+  /** Prism's own Pro/Team. `plan` then carries the tier it includes
+   *  (Pro: standard, Team: advanced), which older dashboards display. */
+  prism_plan?: "pro" | "team" | null;
   plan_source?: "stripe" | "managed";
   billing_status?: "free" | "trialing" | "active" | "past_due" | "unpaid" | "canceled" | "incomplete" | "incomplete_expired" | "paused" | "managed" | "unknown" | "sync_pending";
   trial_ends_at?: string | null;
@@ -52,6 +56,8 @@ export interface AccountRouterDeps {
   getJwt: typeof getSynaluxJwt;
   invalidateJwt: typeof invalidateSynaluxJwt;
   invalidateEntitlements: typeof invalidateEntitlements;
+  /** Drops the inference policies the previous account loaded (inferencePolicy.ts). */
+  clearInferencePolicies: typeof clearInferencePolicies;
   closeStorage: () => Promise<void>;
   resolvePortalBaseUrl: typeof resolvePortalBaseUrl;
   usablePortalKey: typeof usablePortalKey;
@@ -64,6 +70,7 @@ const defaultDeps: AccountRouterDeps = {
   getJwt: getSynaluxJwt,
   invalidateJwt: invalidateSynaluxJwt,
   invalidateEntitlements,
+  clearInferencePolicies,
   closeStorage: async () => (await import("../storage/index.js")).closeStorage(),
   resolvePortalBaseUrl,
   usablePortalKey,
@@ -174,6 +181,7 @@ function normalizeAccount(value: unknown, origin: string): DashboardAccount {
     role_key: typeof raw.role_key === "string" ? raw.role_key.slice(0, 80) : null,
     plan: plan as DashboardAccount["plan"],
     subscription_plan: subscriptionPlan,
+    prism_plan: raw.prism_plan === "pro" || raw.prism_plan === "team" ? raw.prism_plan : null,
     plan_source: raw.plan_source === "managed" ? "managed" : "stripe",
     billing_status: billingStatus,
     trial_ends_at: billingStatus === "trialing" || billingStatus === "sync_pending" ? trialEndsAt : null,
@@ -277,6 +285,7 @@ export async function connectDashboardAccount(code: unknown, overrides: Partial<
   process.env.PRISM_SYNALUX_API_KEY = token;
   deps.invalidateJwt();
   deps.invalidateEntitlements();
+  deps.clearInferencePolicies();
   await deps.closeStorage();
   return accountWithJwt(deps, origin);
   });
@@ -327,6 +336,7 @@ export async function signOutDashboardAccount(overrides: Partial<AccountRouterDe
   delete process.env.PRISM_SYNALUX_API_KEY;
   deps.invalidateJwt();
   deps.invalidateEntitlements();
+  deps.clearInferencePolicies();
   await deps.setSetting("PRISM_SYNALUX_SIGNED_OUT", "true");
   await deps.setSetting("PRISM_SYNALUX_API_KEY", "");
   await deps.closeStorage();

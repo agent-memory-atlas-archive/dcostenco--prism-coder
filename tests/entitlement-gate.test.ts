@@ -84,8 +84,15 @@ describe("prism_infer enforces the gate end-to-end", () => {
     expect((await tiersTried("27b", "27b")).some(m => m.includes("27b"))).toBe(true);
   });
 
-  it("a RETIRED plan tier ('14b') is gated to the free floor, not opened up", async () => {
+  it("a RETIRED plan tier ('14b') gets the free floor, never more", async () => {
+    // Since 2026-09-26 the free floor has no model cap (the local model runs on
+    // the user's own machine), so the floor is the whole ladder; the guard is
+    // that an unparseable ceiling grants exactly what a free user gets.
+    const ladder = ["2b", "4b", "9b", "27b"];
+    const floor = ladder.indexOf(FREE_ENTITLEMENTS.model_ceiling);
     const tried = await tiersTried("14b", "27b");
-    expect(tried.some(m => m.includes("27b") || m.includes("9b"))).toBe(false);
+    const tiers = tried.map(m => ladder.indexOf(m.split(":")[1]));
+    expect(tiers.length).toBeGreaterThan(0);
+    expect(Math.max(...tiers)).toBe(floor);   // up to the free floor, never past it
   });
 });

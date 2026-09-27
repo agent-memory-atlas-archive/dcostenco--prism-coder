@@ -155,7 +155,8 @@ describe("getEntitlements cache", () => {
         _resetEntitlementsForTest();
         const result = await getEntitlements();
         expect(result.plan).toBe("free");
-        expect(result.model_ceiling).toBe("4b");
+        // no account: everything local, no model-size cap (owner 2026-09-26)
+        expect(result.model_ceiling).toBe("27b");
         expect(result.max_tokens).toBe(512);
     });
 
@@ -175,7 +176,7 @@ describe("getEntitlements cache", () => {
 describe("FREE_ENTITLEMENTS", () => {
     it("has correct free tier limits", () => {
         expect(FREE_ENTITLEMENTS.plan).toBe("free");
-        expect(FREE_ENTITLEMENTS.model_ceiling).toBe("4b");
+        expect(FREE_ENTITLEMENTS.model_ceiling).toBe("27b");
         expect(FREE_ENTITLEMENTS.daily_infer_limit).toBe(50);
         expect(FREE_ENTITLEMENTS.max_tokens).toBe(512);
     });
