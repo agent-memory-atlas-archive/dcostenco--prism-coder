@@ -158,6 +158,27 @@ or by re-enabling after each run.
 <details>
 <summary>Release history (optional)</summary>
 
+## What's New in v20.21.16
+
+### Conversations: checked on your device, and free with an account
+
+- A local answer to a conversation is checked on your device before it is
+  served. If the check fails or cannot run, the answer goes to the cloud when
+  your plan and settings allow it, and is withheld otherwise.
+- On Pro and Team, a local answer that passes is also confirmed by Synalux, on
+  a copy pseudonymized on your device; the mapping stays on your device. With
+  an image attached, or with the cloud off, the checked local answer is served.
+- When the on-device screen's 4b is unsure about a conversation, the 9b reads
+  it again before the conversation is refused or sent to the cloud.
+- Everything local is free with no account and no cap on the local model size.
+  A free Synalux account adds multi-turn `prism_infer` and 20 cloud answers a
+  day. Pro ($15/month) and Team ($20/seat/month) are Prism's own plans.
+- Optional You.com web search: set `YDC_API_KEY` to enable
+  `youcom_web_search` (contributed by @mouse-value-add in #227).
+- Fixed: the 2b and 4b no longer answer Prism's own requests as a tool router.
+  A system prompt built into those models had turned some answers into tool
+  calls and made the on-device screen refuse some ordinary requests.
+
 ## What's New in v20.21.15
 
 ### Follow-ups: see what runs locally, and a stricter screen when the classifier is down
@@ -1345,7 +1366,7 @@ Everything that runs on your machine is free, with no account and no cap on the 
 | Cloud answers (Gemini 3.6 Flash; a free account's conversations: 3.5 Flash-Lite) | -- | 20/day | 1,000/month (500 in the trial; 200/day max) | 1,500/month per seat (200/day max) |
 | Cloud confirmation of a local answer (on a pseudonymized copy) | -- | -- | ✅ | ✅ |
 | Grounding verifier (fact-check AI output; counts as a cloud answer) | -- | -- | ✅ | ✅ |
-| Cloud search | -- | -- | 10/day | 10/day per seat |
+| Cloud search | -- | -- | 1,000/month (150/day max) | 1,500/month per seat (150/day max) |
 | Memory sync (cloud) | -- | -- | ✅ | ✅ |
 | Full skill library, super-skills, agent routing, account and team skills | -- | -- | ✅ | ✅ |
 | Seats | 1 | 1 | 1 | 2 or more |

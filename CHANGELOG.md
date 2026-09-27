@@ -2,6 +2,65 @@
 
 All notable changes to this project will be documented in this file.
 
+## 20.21.16 — 2026-09-27
+
+### A local answer to a conversation is checked before it is served
+
+`prism_infer` now checks a multi-turn local answer on your device before
+serving it: the local model that answered reads the conversation and its
+answer again and decides whether the answer holds. The rules it applies are fetched from Synalux by their
+SHA-256, verified, and held in memory only.
+- If the check fails, or cannot run (for example because the rules could not
+  be fetched), the answer goes to the cloud when your plan and settings allow
+  it, and is withheld otherwise.
+- On Pro and Team, with the cloud allowed, a local answer that passes is
+  confirmed by Synalux on a copy pseudonymized on your device. Names, dates,
+  contact details and record numbers become stable placeholders, and the
+  mapping stays on your device. If Synalux does not confirm the answer, the
+  cloud answers instead.
+- With an image attached, or with the cloud off, a local answer that passes
+  the on-device check is served.
+
+Single prompts are not affected.
+
+### The 9b reads a conversation again before it is refused or sent to the cloud
+
+When the on-device screen's 4b is unsure about a conversation, the 9b reads it
+again under a pinned exclusion policy, fetched and held the same way as the
+check's rules. If the 9b clears it, the conversation is answered locally. The
+read is sized from each model's measured limits and bounded by a deadline, and
+its outcome is recorded in the local ledger without conversation text.
+
+### Plans
+
+Everything local is free, with no account and no cap on the local model size
+(without an account, the cap was the 4b). A free Synalux account adds
+multi-turn `prism_infer` with the on-device check, and 20 cloud answers a day.
+Pro ($15/month) and Team ($20/seat/month, two seats or more) are Prism's own
+plans, with monthly cloud answers; the dashboard's Account panel shows them. A
+conversation sent without an account is refused, with a pointer to a free
+sign-in (`prism dashboard`, then Account).
+
+### Optional You.com web search
+
+Set `YDC_API_KEY` to enable the `youcom_web_search` tool. Contributed by
+@mouse-value-add in #227. The key is never echoed in errors, redirects are
+refused, and the result count is kept between 1 and 20.
+
+### Fixed: the 2b and 4b no longer answer Prism's own requests as a tool router
+
+The 2b and 4b carry a system prompt for apps that call them directly. Ollama
+applied it to Prism's own requests whenever they carried no system prompt, so
+some `prism_infer` answers came back as a tool call, and the on-device screen
+refused some ordinary requests. Prism now sends an empty system prompt to a
+model that has one built in, or whose configuration Ollama cannot report. A
+model without one, such as the 9b, gets the same request as before.
+
+### Also
+
+- The on-device classifier sees your words exactly as written. Text such as
+  `$&` or `` $` `` was expanded as a replacement pattern before.
+
 ## 20.21.15 — 2026-09-25
 
 ### A follow-up is no longer served on keyword checks alone while the classifier is down
