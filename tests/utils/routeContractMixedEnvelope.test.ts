@@ -79,3 +79,32 @@ describe("route contract accepts the envelopes models actually emit", () => {
         expect(parseRouteOutput("You could save that to the ledger.").kind).toBe("plain_text");
     });
 });
+
+// A conversation's route answer is checked like prose whenever it would put
+// prose in front of the user (review 2026-09-26: prose before an
+// unterminated envelope was served unchecked).
+import { routeServesProse } from "../../src/utils/routeContract.js";
+describe("routeServesProse", () => {
+    const CALL = '{"name":"session_load_context","arguments":{"project":"x"}}';
+    it("plain text is prose; a bare tool call, terminated or not, raw JSON, and a malformed call are not", () => {
+        expect(routeServesProse("You have 135 units left.")).toBe(true);
+        expect(routeServesProse(`<|tool_call|>${CALL}<|tool_call_end|>`)).toBe(false);
+        expect(routeServesProse(`<|tool_call|>${CALL}</tool_call>`)).toBe(false);
+        expect(routeServesProse(`<tool_call>${CALL}</tool_call>`)).toBe(false);
+        expect(routeServesProse(`<|tool_call|> ${CALL}`)).toBe(false);
+        expect(routeServesProse(`  ${CALL}\n`)).toBe(false);
+        expect(routeServesProse(`<|tool_call|>{"name":`)).toBe(false);
+    });
+    it("prose before an unterminated envelope is prose: the call parses and the draft is served whole", () => {
+        const draft = `You have 195 units remaining.\n<|tool_call|>${CALL}`;
+        expect(parseRouteOutput(draft).kind).toBe("tool_call");
+        expect(applyLocalRouteContract(draft).output).toContain("195");
+        expect(routeServesProse(draft)).toBe(true);
+    });
+    it("prose around a terminated envelope makes it malformed, served as NO_TOOL: no prose reaches the user", () => {
+        for (const draft of [`You have 195 units remaining.\n<|tool_call|>${CALL}<|tool_call_end|>`, `<|tool_call|>${CALL}<|tool_call_end|>\nAlso, you have 195 units.`]) {
+            expect(applyLocalRouteContract(draft).output, draft).toBe("NO_TOOL");
+            expect(routeServesProse(draft), draft).toBe(false);
+        }
+    });
+});

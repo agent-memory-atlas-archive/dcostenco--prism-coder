@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "evaluator": "second-read-exclusion/1",
+  "second_read": {
+    "operational_terms": [
+      "\\bvault\\b",
+      "\\bmaster[\\s-]?keys?\\b",
+      "\\bcontrol\\s+room\\b",
+      "\\bbackdoors?\\b",
+      "\\bwire\\s+transfers?\\b",
+      "\\broot\\s+shell\\b",
+      "\\bleak(?:ed|s|ing)?\\s+(?:the\\s+)?ledger\\b",
+      "\\blaunch\\s+codes?\\b"
+    ],
+    "classifier_labels": "\\b(?:OBVIOUS_(?:NOT_)?RESERVED|UNCERTAIN(?:_LENGTH)?)\\b",
+    "classifier_directed": "\\bclassifiers?\\b|\\bscreen(?:er|ing)\\s+note\\b",
+    "deploy_term": "\\b(?:re)?deploy\\w*",
+    "deploy_script_noun": "\\bdeploy(?:ment)?[\\s_-]+scripts?\\b",
+    "deploy_decision": ["\\b(?:can|should|now|go)\\b", "\\b(?:run|ship|approv|trigger)\\w*"]
+  }
+}

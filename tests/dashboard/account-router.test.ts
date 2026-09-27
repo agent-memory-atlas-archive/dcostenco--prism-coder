@@ -150,6 +150,16 @@ describe("dashboard account service", () => {
     });
   });
 
+  it("keeps Prism's own Pro or Team next to the tier it includes; anything else is no Prism plan", async () => {
+    const h = harness({ PRISM_SYNALUX_API_KEY: TOKEN });
+    for (const [prism_plan, plan, want] of [
+      ["pro", "standard", "pro"], ["team", "advanced", "team"], ["enterprise", "standard", null], [undefined, "standard", null],
+    ] as const) {
+      h.fetcher.mockResolvedValueOnce(new Response(JSON.stringify({ ...account(plan), prism_plan }), { status: 200 }));
+      await expect(loadDashboardAccount(h.deps)).resolves.toMatchObject({ plan, prism_plan: want });
+    }
+  });
+
   it("exchanges a one-time Prism code, stores the credential, and loads the account", async () => {
     const h = harness();
     h.fetcher.mockImplementation(async (input, init) => {

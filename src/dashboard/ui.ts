@@ -1430,7 +1430,7 @@ export function renderDashboardHTML(version: string): string {
       </div>
 
       <div style="margin-top:1.25rem;padding:0.85rem;border-radius:var(--radius-sm);background:rgba(16,185,129,0.08);border:1px solid rgba(16,185,129,0.2);font-size:0.78rem;color:var(--text-secondary)">
-        ✅ <strong>All 6 enforcement layers are active.</strong> Ethics enforcement is NOT tier-gated — applies equally to Free, Standard, Advanced, and Enterprise.
+        ✅ <strong>All 6 enforcement layers are active.</strong> Ethics enforcement is NOT tier-gated — applies equally to Free, the free account, Pro and Team.
         <a href="/ethics" style="color:var(--accent-purple);margin-left:0.5rem">View full policy →</a>
       </div>
     </div>
@@ -2111,13 +2111,22 @@ var _searchBoost = document.getElementById('searchContextBoost');
 if (_searchBoost)
     _searchBoost.addEventListener('change', performSearch);
 var currentAccount = null;
+// Prism's own Pro and Team arrive as the tier they include (plan) plus
+// prism_plan; show their names when the tier is theirs.
+function accountDisplayPlan(account) {
+    if (account && account.prism_plan === 'pro' && account.plan === 'standard') return 'pro';
+    if (account && account.prism_plan === 'team' && account.plan === 'advanced') return 'team';
+    return account ? account.plan : 'free';
+}
 function accountPlanLabel(plan) {
-    var labels = { free: 'Free', standard: 'Standard', advanced: 'Advanced', enterprise: 'Enterprise' };
+    var labels = { free: 'Free', pro: 'Pro', team: 'Team', standard: 'Standard', advanced: 'Advanced', enterprise: 'Enterprise' };
     return labels[plan] || 'Free';
 }
 function accountPlanSummary(plan) {
     var summaries = {
         free: 'Local memory, local models, and the Mind Palace dashboard remain available without an account.',
+        pro: 'Prism Pro is active: cloud answers, answer confirmation, sync, and the full skill library.',
+        team: 'Prism Team is active for this seat: cloud answers, answer confirmation, sync, and team skills.',
         standard: 'Cloud sync and paid Prism services are active for this account.',
         advanced: 'Advanced cloud capacity and team features are active for this account.',
         enterprise: 'Enterprise capacity, governance, and support are active for this account.'
@@ -2143,13 +2152,13 @@ function accountBillingBadge(account) {
 function accountSubscriptionSummary(account) {
     if (account.billing_status === 'trialing') {
         var end = accountTrialEndLabel(account.trial_ends_at);
-        return accountPlanLabel(account.plan) + ' trial is active' + (end ? ' through ' + end : '') +
+        return accountPlanLabel(accountDisplayPlan(account)) + ' trial is active' + (end ? ' through ' + end : '') +
             '. Add payment details before the trial ends to continue; otherwise it cancels automatically.';
     }
     if (['past_due', 'unpaid', 'incomplete', 'paused'].indexOf(account.billing_status) >= 0) {
         var billedPlan = account.subscription_plan
             ? accountPlanLabel(account.subscription_plan) + ' plan'
-            : account.plan === 'free' ? 'paid subscription' : accountPlanLabel(account.plan) + ' plan';
+            : account.plan === 'free' ? 'paid subscription' : accountPlanLabel(accountDisplayPlan(account)) + ' plan';
         return 'Your ' + billedPlan + ' needs billing attention. Update payment details to restore or keep cloud features active.';
     }
     if (account.billing_status === 'sync_pending') {
@@ -2157,7 +2166,7 @@ function accountSubscriptionSummary(account) {
         var syncTrialEnd = accountTrialEndLabel(account.trial_ends_at);
         return 'Stripe confirms your ' + syncingPlan + ' subscription' +
             (syncTrialEnd ? ' with a trial through ' + syncTrialEnd : '') +
-            '. Synalux is updating access; current access remains ' + accountPlanLabel(account.plan) + '. Retry shortly or manage the subscription.';
+            '. Synalux is updating access; current access remains ' + accountPlanLabel(accountDisplayPlan(account)) + '. Retry shortly or manage the subscription.';
     }
     if (account.billing_status === 'canceled' || account.billing_status === 'incomplete_expired') {
         return 'This paid subscription is no longer active. Local Prism Free remains available.';
@@ -2165,7 +2174,7 @@ function accountSubscriptionSummary(account) {
     if (account.billing_status === 'unknown') {
         return 'Prism could not verify the current trial or payment status. Open billing to review the subscription; local features remain available.';
     }
-    return accountPlanSummary(account.plan);
+    return accountPlanSummary(accountDisplayPlan(account));
 }
 function renderPlanLadder(plan) {
     var tiers = [
@@ -2201,7 +2210,7 @@ function renderAccountChip(account, error) {
             ? planStatus
             : account.plan === 'free' && planStatus === 'Payment due'
                 ? planStatus
-                : accountPlanLabel(account.plan) + planStatus;
+                : accountPlanLabel(accountDisplayPlan(account)) + planStatus;
         chip.innerHTML = '<span class="role-icon">🤖</span><span class="identity-label">' + escapeHtml(account.name || 'Synalux user') + '</span>' +
             '<span class="plan-mini' + planStatusClass + '">' + escapeHtml(chipPlanLabel) + '</span>';
     }
@@ -2251,7 +2260,7 @@ function renderAccountPanel(account, error) {
         account.billing && account.billing.action === 'included' ? 'View plans' : 'Start 14-day trial';
     managedBadge = account.plan_source === 'managed' ? '<span class="account-badge managed">Managed</span>' : '';
     panel.innerHTML = '<div class="account-card"><div class="account-card-head"><div>' +
-        '<div class="account-badges"><span class="account-badge">' + escapeHtml(accountPlanLabel(account.plan)) + '</span>' +
+        '<div class="account-badges"><span class="account-badge">' + escapeHtml(accountPlanLabel(accountDisplayPlan(account))) + '</span>' +
         '<span class="account-badge role">' + escapeHtml(role) + '</span>' + managedBadge + accountBillingBadge(account) + '</div>' +
         '<div class="account-name">' + escapeHtml(account.name || 'Synalux user') + '</div>' +
         '<div class="account-summary">' + escapeHtml(accountSubscriptionSummary(account)) + '</div></div></div>' +

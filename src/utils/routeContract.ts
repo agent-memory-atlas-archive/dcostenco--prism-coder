@@ -282,6 +282,25 @@ export function parseRouteOutput(output: string): ParsedRouteOutput {
     return { kind: "plain_text" };
 }
 
+/**
+ * Whether a route answer would put prose in front of the user: plain text, or
+ * a tool call with text outside its envelope (the envelope parses, and the
+ * draft is served whole). A bare tool call, or a malformed one (served as
+ * NO_TOOL), carries none.
+ */
+export function routeServesProse(output: string): boolean {
+    const parsed = parseRouteOutput(output);
+    if (parsed.kind === "plain_text") return true;
+    if (parsed.kind !== "tool_call") return false;
+    const t = output.trim();
+    if (t.startsWith("{")) return false;   // raw tool JSON, parsed whole
+    if (!t.startsWith(PIPE_START) && !t.startsWith(ANGLE_START)) return true;   // text before the envelope
+    const ends = END_TOKENS.map(e => ({ e, at: t.lastIndexOf(e) })).filter(x => x.at >= 0);
+    if (ends.length === 0) return false;   // unterminated: everything after the opener parsed as the call
+    const last = ends.reduce((a, b) => (b.at > a.at ? b : a));
+    return t.slice(last.at + last.e.length).trim() !== "";   // text after the envelope
+}
+
 export function applyLocalRouteContract(
     draft: string,
     allowedTools: ReadonlySet<string> = DEFAULT_PRISM_ROUTE_TOOLS,

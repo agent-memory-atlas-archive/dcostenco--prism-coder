@@ -2,7 +2,8 @@
  * prism_infer Tier Enforcement Tests
  *
  * Verifies that runInfer() correctly enforces entitlement gates:
- *   1. Model ceiling — free=4b, standard=9b, advanced/enterprise=27b
+ *   1. Model ceiling — no account: no cap (the model runs on the user's own
+ *      machine, owner 2026-09-26); a plan may still set one, and it binds
  *   2. Max tokens — clamped to plan limit
  *   3. Cloud fallback — blocked for free users
  *   4. Grounding verifier — blocked for free users
@@ -123,24 +124,21 @@ const baseArgs: PrismInferArgs = { prompt: "test prompt" };
 // ── 1. Model Ceiling Enforcement ─────────────────────────────────
 
 describe("model ceiling enforcement", () => {
-    it("free user requesting 27b gets clamped to 4b model", async () => {
+    it("a user with no account requesting 27b is not capped: the largest model the machine fits", async () => {
         const deps = mockDeps({ entitlements: FREE });
-        const result = await runInfer({ ...baseArgs, model_ceiling: "27b" }, deps);
+        await runInfer({ ...baseArgs, model_ceiling: "27b" }, deps);
 
-        // callLocal should have been called with a model ≤ 4b
         const calls = (deps.callLocal as ReturnType<typeof vi.fn>).mock.calls;
         expect(calls.length).toBeGreaterThan(0);
-        const modelUsed = calls[0][1];
-        expect(modelUsed).toMatch(/2b|4b/);
+        expect(calls[0][1]).toMatch(/9b|27b/);
     });
 
-    it("free user requesting 9b gets clamped to 4b", async () => {
+    it("a user with no account requesting 9b gets the 9b", async () => {
         const deps = mockDeps({ entitlements: FREE });
-        const result = await runInfer({ ...baseArgs, model_ceiling: "9b" }, deps);
+        await runInfer({ ...baseArgs, model_ceiling: "9b" }, deps);
 
         const calls = (deps.callLocal as ReturnType<typeof vi.fn>).mock.calls;
-        const modelUsed = calls[0][1];
-        expect(modelUsed).toMatch(/2b|4b/);
+        expect(calls[0][1]).toMatch(/9b/);
     });
 
     it("standard user requesting 27b selects the entitled 9b model", async () => {
@@ -165,13 +163,12 @@ describe("model ceiling enforcement", () => {
         expect(modelUsed).toMatch(/27b/);
     });
 
-    it("free user with no ceiling specified gets 4b max", async () => {
+    it("a user with no account and no ceiling specified is not held to the 4b", async () => {
         const deps = mockDeps({ entitlements: FREE });
-        const result = await runInfer({ ...baseArgs }, deps);
+        await runInfer({ ...baseArgs }, deps);
 
         const calls = (deps.callLocal as ReturnType<typeof vi.fn>).mock.calls;
-        const modelUsed = calls[0][1];
-        expect(modelUsed).toMatch(/2b|4b/);
+        expect(calls[0][1]).not.toMatch(/2b|4b/);
     });
 });
 
@@ -363,7 +360,7 @@ describe("plan in response", () => {
 // ── 6. Combined Gate Scenarios ───────────────────────────────────
 
 describe("combined gate scenarios", () => {
-    it("free user: 4b ceiling + 512 tokens + no cloud + no verifier", async () => {
+    it("free user: no model cap + local tokens uncapped + no cloud + no verifier", async () => {
         const verifierFn = vi.fn(async ({ draft }: { draft: string }) => ({
             action: "accept" as const, finalText: draft, verifierChain: [],
         }));
@@ -383,11 +380,9 @@ describe("combined gate scenarios", () => {
             evidence: [{ source: "x", content: "y" }],
         }, deps);
 
-        // Model: only 4b or lower (no 9b, no 27b)
+        // Model: not held to the 4b (no model-size cap without an account)
         const localCalls = (deps.callLocal as ReturnType<typeof vi.fn>).mock.calls;
-        for (const call of localCalls) {
-            expect(call[1]).toMatch(/2b|4b/);
-        }
+        expect(localCalls[0][1]).toMatch(/9b|27b/);
 
         // Tokens: the 512 plan cap binds CLOUD spend, not the user's own GPU.
         // Cloud clamping has its own test in prismInferBudgetScope.test.ts.

@@ -38,6 +38,9 @@ export interface DashboardAccount {
   role_key: string | null;
   plan: "free" | "standard" | "advanced" | "enterprise";
   subscription_plan?: "standard" | "advanced" | "enterprise" | null;
+  /** Prism's own Pro/Team. `plan` then carries the tier it includes
+   *  (Pro: standard, Team: advanced), which older dashboards display. */
+  prism_plan?: "pro" | "team" | null;
   plan_source?: "stripe" | "managed";
   billing_status?: "free" | "trialing" | "active" | "past_due" | "unpaid" | "canceled" | "incomplete" | "incomplete_expired" | "paused" | "managed" | "unknown" | "sync_pending";
   trial_ends_at?: string | null;
@@ -174,6 +177,7 @@ function normalizeAccount(value: unknown, origin: string): DashboardAccount {
     role_key: typeof raw.role_key === "string" ? raw.role_key.slice(0, 80) : null,
     plan: plan as DashboardAccount["plan"],
     subscription_plan: subscriptionPlan,
+    prism_plan: raw.prism_plan === "pro" || raw.prism_plan === "team" ? raw.prism_plan : null,
     plan_source: raw.plan_source === "managed" ? "managed" : "stripe",
     billing_status: billingStatus,
     trial_ends_at: billingStatus === "trialing" || billingStatus === "sync_pending" ? trialEndsAt : null,

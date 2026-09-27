@@ -16,6 +16,7 @@ type AccountFixture = {
   role_key: string | null;
   plan: string;
   subscription_plan?: string | null;
+  prism_plan?: string | null;
   plan_source?: string;
   billing_status?: string;
   trial_ends_at?: string | null;
@@ -153,6 +154,23 @@ describe("dashboard Account & Subscription UX", () => {
     expect(text).toContain("2026");
     expect(text).toContain("otherwise it cancels automatically");
     expect(text).toContain("Add payment details");
+  });
+
+  it("names Prism's own Pro and Team instead of the tier they include", async () => {
+    const pro = await openDashboard(fixture("standard", {
+      prism_plan: "pro", subscription_plan: null, billing_status: "trialing", trial_ends_at: "2026-10-10T16:00:00.000Z",
+    }));
+    expect(pro.doc.getElementById("identityChip")?.textContent).toContain("Pro trial");
+    expect(pro.doc.getElementById("accountPanel")?.textContent).toContain("Pro trial is active through");
+    const team = await openDashboard(fixture("advanced", {
+      prism_plan: "team", subscription_plan: null, billing_status: "managed", plan_source: "managed",
+      billing: { action: "included", url: "https://synalux.ai/pricing#prism-plans" },
+    }));
+    expect(team.doc.getElementById("identityChip")?.textContent).toContain("Team");
+    expect(team.doc.getElementById("accountPanel")?.textContent).toContain("Prism Team is active for this seat");
+    // a Synalux Standard account without a Prism plan keeps its name
+    const standard = await openDashboard(fixture("standard"));
+    expect(standard.doc.getElementById("identityChip")?.textContent).toContain("Standard");
   });
 
   it.each(["past_due", "unpaid", "incomplete", "paused"])("makes %s billing state actionable", async billingStatus => {
