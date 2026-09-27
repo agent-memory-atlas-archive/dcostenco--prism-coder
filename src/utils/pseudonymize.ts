@@ -43,9 +43,13 @@ const PATTERNS: Array<[Kind, RegExp, ((m: string) => boolean)?]> = [
     ["EMAIL", new RegExp(String.raw`[${L}${D}._%+-]+@[${L}${D}-]+(?:\.[${L}${D}-]+)+`, "gu")],
     ["URL", /(?:https?:\/\/|www\.)[^\s<>"')\]]+/giu],
     ["SSN", new RegExp(String.raw`(?<!${D})${D}{3}-${D}{2}-${D}{4}(?!${D})`, "gu")],
-    // "+44 20 7946 0958", "(212) 555-0199", "555-123-4567", "020 7946 0958"; not "240 65 40"
+    // "+44 20 7946 0958", "(212) 555-0199", "555-123-4567", "020 7946 0958", and a
+    // local "555-0142" / "555.0142" (3-4 with a hyphen or dot; with a space it is
+    // too often two quantities); not "240 65 40". A 3-4 range such as "800-1200"
+    // is replaced too: the same value keeps the same token, so the check can
+    // still compare it.
     ["PHONE", new RegExp(String.raw`(?<![${L}${D}])(?:\+${D}{1,3}[\s.-]?)?(?:\(${D}{1,4}\)[\s.-]?)?${D}{2,5}(?:[\s.-]${D}{2,5}){1,4}(?!${D})`, "gu"),
-        m => { const n = (m.match(/\p{Nd}/gu) ?? []).length; return n >= 7 && n <= 15 && (/^[+(]/.test(m) || /^\p{Nd}{3}[\s.-]\p{Nd}{3}[\s.-]\p{Nd}{4}$/u.test(m) || n >= 10); }],
+        m => { const n = (m.match(/\p{Nd}/gu) ?? []).length; return n >= 7 && n <= 15 && (/^[+(]/.test(m) || /^\p{Nd}{3}[\s.-]\p{Nd}{3}[\s.-]\p{Nd}{4}$/u.test(m) || /^\p{Nd}{3}[.-]\p{Nd}{4}$/u.test(m) || n >= 10); }],
     ["DATE", new RegExp(String.raw`(?<!${D})${D}{1,2}[\/.-]${D}{1,2}[\/.-]${D}{2,4}(?!${D})|(?<!${D})${D}{4}-${D}{2}-${D}{2}(?!${D})|${EDGE_L}${MONTH}\.?\s+${D}{1,2}(?:st|nd|rd|th)?(?:,?\s+${D}{4})?${EDGE_R}|(?<!${D})${D}{1,2}(?:st|nd|rd|th)?\s+(?:of\s+)?${MONTH}\.?(?:,?\s+${D}{4})?${EDGE_R}|${EDGE_L}${MONTH}\.?,?\s+${D}{4}(?!${D})`, "giu")],
     // labelled numbers: record, account, member, policy, claim, case, license…; the value holds a digit
     ["ID", new RegExp(String.raw`${EDGE_L}(?:mrn|medical\s+record|record|acct|account|member|policy|claim|patient|client|case|license|licence|npi|dea|id|ref|reference|invoice|order)\s*(?:no\.?|number|#|id)?\s*[:#]?\s*(?=[${L}${D}-]*${D})[${L}${D}][${L}${D}-]{3,}${EDGE_R}`, "giu")],

@@ -16,6 +16,9 @@ describe("identifiers are replaced", () => {
             ["See https://clinic.example.com/p/123 now", "clinic.example.com"],
             ["Call 555-123-4567 please", "555-123-4567"],
             ["Fax (212) 555-0199 please", "555-0199"],
+            // a local number, seven digits as 3-4 (it went out as-is before)
+            ["My callback number is 555-0142, can you note that down?", "555-0142"],
+            ["Text me at 555.0142 tonight", "555.0142"],
             ["Call +44 20 7946 0958 please", "7946 0958"],
             ["Her SSN 123-45-6789 is on file", "123-45-6789"],
             ["Her MRN is 00123456 and it is on file", "00123456"],
@@ -50,6 +53,14 @@ describe("identifiers are replaced", () => {
 });
 
 describe("the same identifier is the same token everywhere; different ones differ", () => {
+    it("a local number keeps its identity: the same number is the same token, a different one is not", () => {
+        const same = pseudonymizeForCheck([{ role: "user", content: "My callback number is 555-0142." }], "What's the callback number?", "Your callback number is 555-0142.");
+        expect(same.messages[0].content).toBe("My callback number is PHONE_1.");
+        expect(same.answer).toBe("Your callback number is PHONE_1.");
+        const other = pseudonymizeForCheck([{ role: "user", content: "My callback number is 555-0142." }], "What's the callback number?", "I have it: 575-0142.");
+        expect(other.messages[0].content).toBe("My callback number is PHONE_1.");
+        expect(other.answer).toBe("I have it: PHONE_2.");
+    });
     it("across turns, the request and the answer, whatever the case", () => {
         const r = pseudonymizeForCheck(
             [{ role: "user", content: "Book it for Maria Lopez on 03/14/2026." }, { role: "assistant", content: "Booked for Maria." }],
@@ -81,6 +92,9 @@ describe("what is not an identifier stays, so the check can still read the conve
             "It was 12.50 each in 2024, OK?",
             "The scores were 240 65 40, then 12 15 18.",
         ]) expect(out(text), text).toBe(text);
+    });
+    it("seven digits split by a space are not a phone number (quantities stay)", () => {
+        expect(out("We sold 240 1200-unit packs.")).toBe("We sold 240 1200-unit packs.");
     });
     it("a word the text also writes in lowercase is not a name at a sentence start", () => {
         expect(out("Cancel the booking. Please cancel it now.")).toBe("Cancel the booking. Please cancel it now.");
