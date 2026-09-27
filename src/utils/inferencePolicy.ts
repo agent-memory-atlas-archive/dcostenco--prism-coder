@@ -6,7 +6,9 @@
  * policy a client runs is the one it was released and validated with.
  *
  * They are held in memory only, never in settings (session exports copy
- * settings). Anything but the pinned, well-formed artifact is no policy: with
+ * settings), and dropped when the account changes (clearInferencePolicies,
+ * called on dashboard sign-in and sign-out); a load the portal refuses is not
+ * kept. Anything but the pinned, well-formed artifact is no policy: with
  * no second-read policy the second read does not run (the hedge stands); with
  * no answer-check policy a local answer to a conversation is unchecked (cloud,
  * else withheld).
@@ -30,12 +32,115 @@ const MAX_ARTIFACT_BYTES = 64 * 1024;
 const MAX_PATTERN_CHARS = 1_024;
 const MIN_OPERATIONAL_TERMS = 8;
 const MIN_DEPLOY_DECISION = 2;
+/** A list longer than this is not a policy this client was released with. */
+const MAX_LIST_ENTRIES = 1_000;
+/** A group whose body repeats may be repeated at most this many times. */
+const MAX_BOUNDED_GROUP_REPEAT = 3;
 /** The whole load, JWT exchange included. */
 const LOAD_DEADLINE_MS = 8_000;
 /** After a failed load, conversations run without the second read this long before the next try. */
 const RETRY_AFTER_MS = 30_000;
 
 const sha256 = (s: string) => createHash("sha256").update(s, "utf8").digest("hex");
+
+/**
+ * A syntactic guard against exponential backtracking. JavaScript cannot
+ * interrupt a match once it starts (a 29-character input held the process for
+ * ten seconds on `(a+)+$`), so a pattern from an artifact is refused BEFORE it
+ * is compiled.
+ *
+ * Refused: a group repeated without bound (`+`, `*`, `{n,}`) or more than
+ * MAX_BOUNDED_GROUP_REPEAT times whose body can match strings of different
+ * lengths (it holds `*`, `+`, `?` or `{n,m}`) or offers alternatives:
+ * `(a+)+`, `(?:a{1,4})+`, `(a|aa)+`, `(\w+\s?)*`, `(.*a){20}`. Allowed: a
+ * repeated group of fixed-width pieces, `(?:,\d{3})+`; a short bounded repeat,
+ * `(?:\S+\s+){0,3}`; alternation that is not repeated. Character classes
+ * follow JavaScript's rules (`[]` and `[^]` close at once); an escaped
+ * character is literal.
+ *
+ * It is a conservative check of these nested-repetition shapes, not a proof
+ * that a pattern runs in linear time: polynomial cost from adjacent
+ * quantifiers is not detected, nor is a shape it does not model. The control is
+ * the pin: only an artifact this client was released with is ever compiled,
+ * and its patterns are checked before release.
+ */
+export function hasNestedRepetition(src: string): boolean {
+    type Frame = { varies: boolean; alternates: boolean };
+    const stack: Frame[] = [{ varies: false, alternates: false }];
+    /** The quantifier at `at`: whether it is unbounded, its maximum, whether the
+     *  width it matches varies (min ≠ max), and where it ends. */
+    const quantifier = (at: number): { unbounded: boolean; max: number; varies: boolean; end: number } | null => {
+        const lazy = (end: number) => end + (src[end] === "?" ? 1 : 0);
+        const ch = src[at];
+        if (ch === "*" || ch === "+") return { unbounded: true, max: Infinity, varies: true, end: lazy(at + 1) };
+        if (ch === "?") return { unbounded: false, max: 1, varies: true, end: lazy(at + 1) };
+        if (ch !== "{") return null;
+        const m = /^\{(\d+)(,(\d*))?\}/.exec(src.slice(at));
+        if (!m) return null;
+        const min = Number(m[1]);
+        const max = m[2] === undefined ? min : m[3] === "" ? Infinity : Number(m[3]);
+        return { unbounded: max === Infinity, max, varies: max !== min, end: lazy(at + m[0].length) };
+    };
+    /** After an atom: a quantifier of varying width makes the enclosing group's width vary. */
+    const afterAtom = (at: number): number => {
+        const q = quantifier(at);
+        if (!q) return at;
+        if (q.varies) stack[stack.length - 1].varies = true;
+        return q.end;
+    };
+    let i = 0;
+    while (i < src.length) {
+        const ch = src[i];
+        if (ch === "\\") { i = afterAtom(i + 2); continue; }
+        if (ch === "[") {
+            // JavaScript: the first unescaped "]" closes the class, even right
+            // after "[" or "[^" ("[]" matches nothing, "[^]" any character).
+            let j = i + 1;
+            if (src[j] === "^") j++;
+            while (j < src.length && src[j] !== "]") j += src[j] === "\\" ? 2 : 1;
+            i = afterAtom(j + 1);
+            continue;
+        }
+        if (ch === "(") {
+            stack.push({ varies: false, alternates: false });
+            i++;
+            if (src[i] === "?") {
+                // (?: (?= (?! (?<= (?<! or a named group (?<name>
+                if (src[i + 1] === "<" && src[i + 2] !== "=" && src[i + 2] !== "!") {
+                    const close = src.indexOf(">", i);
+                    if (close < 0) return true;
+                    i = close + 1;
+                } else {
+                    i += src[i + 1] === "<" ? 3 : 2;
+                }
+            }
+            continue;
+        }
+        if (ch === ")") {
+            if (stack.length === 1) return true;   // unbalanced
+            const body = stack.pop()!;
+            const parent = stack[stack.length - 1];
+            i++;
+            const q = quantifier(i);
+            if (q) {
+                if ((body.varies || body.alternates) && (q.unbounded || q.max > MAX_BOUNDED_GROUP_REPEAT)) return true;
+                if (q.varies) parent.varies = true;
+                i = q.end;
+            }
+            if (body.varies) parent.varies = true;
+            if (body.alternates) parent.alternates = true;
+            continue;
+        }
+        if (ch === "|") { stack[stack.length - 1].alternates = true; i++; continue; }
+        i = afterAtom(i + 1);
+    }
+    return stack.length !== 1;
+}
+
+/** Whether `^(?:src)$` matches `text` (a fragment that does not compile matches nothing). */
+const wholeMatch = (src: string, text: string): boolean => {
+    try { return new RegExp(`^(?:${src})$`).test(text); } catch { return false; }
+};
 
 /** The compiled policy from the artifact's exact bytes, or null for anything
  *  but the expected artifact: another hash, another schema or evaluator, a
@@ -48,8 +153,9 @@ export function parseSecondReadPolicy(bytes: string, expectSha256: string = SECO
     const art = a as { schema?: unknown; evaluator?: unknown; second_read?: Record<string, unknown> };
     if (art?.schema !== 1 || art.evaluator !== SECOND_READ_POLICY_EVALUATOR || typeof art.second_read !== "object" || art.second_read === null) return null;
     const s = art.second_read;
-    const pattern = (v: unknown): v is string => typeof v === "string" && v.length > 0 && v.length <= MAX_PATTERN_CHARS;
-    const list = (v: unknown, min: number): v is string[] => Array.isArray(v) && v.length >= min && v.every(pattern);
+    // No back-reference either: the evaluator never needs one, and it defeats the shape check.
+    const pattern = (v: unknown): v is string => typeof v === "string" && v.length > 0 && v.length <= MAX_PATTERN_CHARS && !/\\[1-9]|\\k</.test(v) && !hasNestedRepetition(v);
+    const list = (v: unknown, min: number): v is string[] => Array.isArray(v) && v.length >= min && v.length <= MAX_LIST_ENTRIES && v.every(pattern);
     if (!list(s.operational_terms, MIN_OPERATIONAL_TERMS) || !list(s.deploy_decision, MIN_DEPLOY_DECISION)) return null;
     if (![s.classifier_labels, s.classifier_directed, s.deploy_term, s.deploy_script_noun].every(pattern)) return null;
     try {
@@ -95,6 +201,13 @@ export function parseAnswerCheckPolicy(bytes: string, expectSha256: string = ANS
     if (!Array.isArray(scale) || scale.length === 0 || scale.length > 16 || !scale.every(k => Number.isInteger(k) && k !== 0 && Math.abs(k) <= 12)) return null;
     // The reader numbers its own groups: a fragment may neither capture nor refer back to one.
     if (fragments.some(f => /\\[1-9]|\\k</.test(f as string))) return null;
+    if (fragments.some(f => hasNestedRepetition(f as string))) return null;
+    // The reader repeats (sign, number) pairs; that stays linear only while the
+    // sign is a real separator: it must consume something and never a digit,
+    // and a number must consume a digit.
+    const sign = ar.minus_or_plus as string, number = ar.number as string;
+    if (wholeMatch(sign, "") || [..."0123456789"].some(d => wholeMatch(sign, d))) return null;
+    if (wholeMatch(number, "") || !wholeMatch(number, "7")) return null;
     try {
         if (fragments.some(f => groups(f as string) !== 0)) return null;
         const arithmetic = {
@@ -121,28 +234,32 @@ interface LoadOptions {
     expectSha256?: string;
 }
 
-/** One pinned artifact: loaded once per process (the portal and the credential
- *  are fixed for its life, config.ts), shared by concurrent callers, retried
- *  after RETRY_AFTER_MS when a load fails. Never throws. */
+/** One pinned artifact: loaded once, shared by concurrent callers, retried
+ *  after RETRY_AFTER_MS when a load fails, and dropped by reset() when the
+ *  account changes (a sign-in can switch the account and the portal). A load
+ *  that was in flight when reset() ran is not kept. Never throws. */
 function pinned<T>(pinnedSha: string, parse: (bytes: string, sha: string) => T | null) {
     let cached: T | null = null;
     let inflight: Promise<T | null> | null = null;
     let retryAt = 0;
+    let generation = 0;
     const get = async (o: LoadOptions = {}): Promise<T | null> => {
         if (!PRISM_SYNALUX_BASE_URL) return null;
         if (cached) return cached;
         if (inflight) return inflight;
         if (Date.now() < retryAt) return null;
+        const started = generation;
         const promise: Promise<T | null> = load(o, o.expectSha256 ?? pinnedSha, parse).then(policy => {
+            if (started !== generation) return policy;   // the account changed meanwhile: not kept
             if (policy) cached = policy;
             else retryAt = Date.now() + RETRY_AFTER_MS;
             return policy;
-        }).catch(() => { retryAt = Date.now() + RETRY_AFTER_MS; return null; })
+        }).catch(() => { if (started === generation) retryAt = Date.now() + RETRY_AFTER_MS; return null; })
             .finally(() => { if (inflight === promise) inflight = null; });
         inflight = promise;
         return promise;
     };
-    const reset = () => { cached = null; inflight = null; retryAt = 0; };
+    const reset = () => { generation++; cached = null; inflight = null; retryAt = 0; };
     return { get, reset };
 }
 
@@ -189,8 +306,14 @@ export const getSecondReadPolicy = (o: LoadOptions = {}) => secondRead.get(o);
 /** The pinned answer-check policy, or null. */
 export const getAnswerCheckPolicy = (o: LoadOptions = {}) => answerCheck.get(o);
 
-/** Tests only. */
-export function _resetSecondReadPolicyForTest(): void {
+/** Drops both cached policies; the next conversation loads them again. Called
+ *  when the account changes (dashboard sign-in and sign-out). */
+export function clearInferencePolicies(): void {
     secondRead.reset();
     answerCheck.reset();
+}
+
+/** Tests only. */
+export function _resetSecondReadPolicyForTest(): void {
+    clearInferencePolicies();
 }

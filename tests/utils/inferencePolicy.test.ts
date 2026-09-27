@@ -19,7 +19,7 @@ vi.mock("../../src/config.js", async (importOriginal) => {
 });
 vi.mock("../../src/utils/synaluxJwt.js", () => ({ getSynaluxJwt: mockGetSynaluxJwt, invalidateSynaluxJwt: mockInvalidateSynaluxJwt }));
 
-import { parseSecondReadPolicy, getSecondReadPolicy, parseAnswerCheckPolicy, getAnswerCheckPolicy, _resetSecondReadPolicyForTest, SECOND_READ_POLICY_SHA256, ANSWER_CHECK_POLICY_SHA256 } from "../../src/utils/inferencePolicy.js";
+import { parseSecondReadPolicy, getSecondReadPolicy, parseAnswerCheckPolicy, getAnswerCheckPolicy, _resetSecondReadPolicyForTest, clearInferencePolicies, hasNestedRepetition, SECOND_READ_POLICY_SHA256, ANSWER_CHECK_POLICY_SHA256 } from "../../src/utils/inferencePolicy.js";
 
 const sha = (s: string) => createHash("sha256").update(s).digest("hex");
 const ARTIFACT = JSON.parse(readFileSync(new URL("../fixtures/second-read-policy.synthetic.json", import.meta.url), "utf8"));
@@ -207,5 +207,83 @@ describe("parseAnswerCheckPolicy", () => {
         fetchMock.mockClear();
         await getAnswerCheckPolicy({ fetchImpl: fetchMock as unknown as typeof fetch });
         expect(String((fetchMock.mock.calls[0] as unknown[])[0])).toBe(`${PORTAL}/api/v1/prism/inference-policy/${ANSWER_CHECK_POLICY_SHA256}`);
+    });
+});
+
+describe("backtracking guard: a match cannot be interrupted once it starts, so these shapes are refused before compiling", () => {
+    it("refuses a group repeated without bound (or more than 3 times) whose body varies in width or offers alternatives", () => {
+        for (const p of ["(a+)+$", "(?:a+)+$", "(a|aa)+", "(\\w+\\s?)*", "(.*a){20}", "((a+))+", "((a|aa))+", "(a*)*b", "(?:x+x+)+y", "(a+){4}", "([a-z]+)*$", "(?<n>a+)+", "(a+){2,}",
+            // bounded but variable-width bodies, and a class JavaScript closes at once (review 2026-09-27, measured exponential)
+            "(?:a{1,4})+x", "(?:a{0,2})+$", "(?:aa?)+$", "[^](x+)+y"])
+            expect(hasNestedRepetition(p), p).toBe(true);
+    });
+    it("allows fixed-width repeats, short bounded repeats, plain alternation, and look-arounds", () => {
+        for (const p of ["(?:,\\d{3})+", "(?:\\d{2})+", "(?:ab){2}x", "(?:\\S+\\s+){0,3}", "\\d+(?:\\.\\d+)?", "\\b(?:alpha|beta)\\w*", "(?:ab)+", "[(a+)+]", "\\(a+\\)+",
+            "[$]?\\d+(?:,\\d{3})*(?:\\.\\d+)?", "(?<![\\w.,$])(?<![+\\-−×*\\/÷]\\s*)", "(?![\\w.…]|\\s*[+\\-−×*\\/÷=]\\s*\\d)", "\\s*[+−]\\s*|\\s+-\\s+"])
+            expect(hasNestedRepetition(p), p).toBe(false);
+    });
+    it("an unbalanced pattern is refused", () => {
+        expect(hasNestedRepetition("(a")).toBe(true);
+        expect(hasNestedRepetition("a)")).toBe(true);
+    });
+    it("a second-read artifact carrying one is no policy, and so is an oversized list", () => {
+        for (const edit of [
+            (a: typeof ARTIFACT) => { a.second_read.operational_terms.push("(a+)+$"); },
+            (a: typeof ARTIFACT) => { a.second_read.deploy_decision.push("(?:x|xx)+y"); },
+            (a: typeof ARTIFACT) => { a.second_read.classifier_directed = "(?:a+)+$"; },
+            (a: typeof ARTIFACT) => { a.second_read.operational_terms.push("(?:a{1,4})+x"); },
+            (a: typeof ARTIFACT) => { a.second_read.operational_terms.push("\\b(\\w)\\1+"); },
+            (a: typeof ARTIFACT) => { a.second_read.operational_terms = Array.from({ length: 1001 }, (_v, i) => `term${i}`); },
+        ]) {
+            const { b, h } = variant(edit);
+            expect(parseSecondReadPolicy(b, h)).toBeNull();
+        }
+        const ok = variant(a => { a.second_read.operational_terms.push("\\bcontrol\\s+(?:\\S+\\s+){0,3}room\\b"); });
+        expect(parseSecondReadPolicy(ok.b, ok.h)).not.toBeNull();
+    });
+    it("an answer-check artifact carrying one is no policy; its separator must neither match nothing nor a digit, and a number must hold one", () => {
+        const ACBYTES = JSON.stringify(JSON.parse(readFileSync(new URL("../fixtures/answer-check-policy.synthetic.json", import.meta.url), "utf8")));
+        const acVariant = (edit: (a: { answer_check: Record<string, any> }) => void) => { const a = JSON.parse(ACBYTES); edit(a); const b = JSON.stringify(a); return { b, h: sha(b) }; };
+        for (const edit of [
+            (a: { answer_check: Record<string, any> }) => { a.answer_check.arithmetic.number = "(?:\\d+)+"; },
+            (a: { answer_check: Record<string, any> }) => { a.answer_check.arithmetic.quoted = "\"(?:[^\"]+)*\""; },
+            (a: { answer_check: Record<string, any> }) => { a.answer_check.arithmetic.minus_or_plus = "\\s*"; },
+            (a: { answer_check: Record<string, any> }) => { a.answer_check.arithmetic.minus_or_plus = "\\s*[+0-9]\\s*"; },
+            (a: { answer_check: Record<string, any> }) => { a.answer_check.arithmetic.number = "\\d*"; },
+        ]) {
+            const { b, h } = acVariant(edit);
+            expect(parseAnswerCheckPolicy(b, h)).toBeNull();
+        }
+        expect(parseAnswerCheckPolicy(ACBYTES, sha(ACBYTES))).not.toBeNull();
+    });
+});
+
+describe("clearInferencePolicies: a sign-out or an account change drops what the previous account loaded", () => {
+    let fetchMock: ReturnType<typeof vi.fn>;
+    beforeEach(() => {
+        vi.clearAllMocks();
+        _resetSecondReadPolicyForTest();
+        mockGetSynaluxJwt.mockResolvedValue("jwt-current");
+        fetchMock = vi.fn(async () => new Response(BYTES, { status: 200 }));
+    });
+    const load = () => getSecondReadPolicy({ fetchImpl: fetchMock as unknown as typeof fetch, expectSha256: SHA });
+    it("the next use fetches again", async () => {
+        expect(await load()).not.toBeNull();
+        expect(await load()).not.toBeNull();
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+        clearInferencePolicies();
+        expect(await load()).not.toBeNull();
+        expect(fetchMock).toHaveBeenCalledTimes(2);
+    });
+    it("a load still in flight when the account changes is not kept", async () => {
+        let release!: () => void;
+        fetchMock.mockImplementationOnce(() => new Promise<Response>(r => { release = () => r(new Response(BYTES, { status: 200 })); }));
+        const pending = load();
+        await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+        clearInferencePolicies();
+        release();
+        await pending;
+        await load();
+        expect(fetchMock).toHaveBeenCalledTimes(2);
     });
 });

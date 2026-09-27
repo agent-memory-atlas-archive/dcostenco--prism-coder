@@ -1,5 +1,6 @@
 import type * as http from "node:http";
 import { invalidateEntitlements } from "../utils/entitlements.js";
+import { clearInferencePolicies } from "../utils/inferencePolicy.js";
 import { getSynaluxJwt, invalidateSynaluxJwt } from "../utils/synaluxJwt.js";
 import { resolvePortalBaseUrl, usablePortalKey } from "../utils/synaluxSearch.js";
 import { isSynaluxSignedOut, setSynaluxSignedOut } from "../utils/synaluxCredentialState.js";
@@ -55,6 +56,8 @@ export interface AccountRouterDeps {
   getJwt: typeof getSynaluxJwt;
   invalidateJwt: typeof invalidateSynaluxJwt;
   invalidateEntitlements: typeof invalidateEntitlements;
+  /** Drops the inference policies the previous account loaded (inferencePolicy.ts). */
+  clearInferencePolicies: typeof clearInferencePolicies;
   closeStorage: () => Promise<void>;
   resolvePortalBaseUrl: typeof resolvePortalBaseUrl;
   usablePortalKey: typeof usablePortalKey;
@@ -67,6 +70,7 @@ const defaultDeps: AccountRouterDeps = {
   getJwt: getSynaluxJwt,
   invalidateJwt: invalidateSynaluxJwt,
   invalidateEntitlements,
+  clearInferencePolicies,
   closeStorage: async () => (await import("../storage/index.js")).closeStorage(),
   resolvePortalBaseUrl,
   usablePortalKey,
@@ -281,6 +285,7 @@ export async function connectDashboardAccount(code: unknown, overrides: Partial<
   process.env.PRISM_SYNALUX_API_KEY = token;
   deps.invalidateJwt();
   deps.invalidateEntitlements();
+  deps.clearInferencePolicies();
   await deps.closeStorage();
   return accountWithJwt(deps, origin);
   });
@@ -331,6 +336,7 @@ export async function signOutDashboardAccount(overrides: Partial<AccountRouterDe
   delete process.env.PRISM_SYNALUX_API_KEY;
   deps.invalidateJwt();
   deps.invalidateEntitlements();
+  deps.clearInferencePolicies();
   await deps.setSetting("PRISM_SYNALUX_SIGNED_OUT", "true");
   await deps.setSetting("PRISM_SYNALUX_API_KEY", "");
   await deps.closeStorage();

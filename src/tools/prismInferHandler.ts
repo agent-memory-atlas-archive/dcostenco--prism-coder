@@ -1318,6 +1318,7 @@ export async function probeClassifierLimits(url: string, model: string): Promise
                     options: { num_predict: 1, temperature: 0 },
                 }),
                 signal: AbortSignal.timeout(CLASSIFIER_LIMITS_TIMEOUT_MS),
+                redirect: "error",
             });
             if (res.ok) {
                 const n = ((await res.json()) as { prompt_eval_count?: number }).prompt_eval_count;
@@ -1330,7 +1331,7 @@ export async function probeClassifierLimits(url: string, model: string): Promise
     }
     let numCtx: number | null = null;
     try {
-        const ps = await fetch(`${url}/api/ps`, { signal: AbortSignal.timeout(5_000) });
+        const ps = await fetch(`${url}/api/ps`, { signal: AbortSignal.timeout(5_000), redirect: "error" });
         if (ps.ok) {
             const loaded = ((await ps.json()) as { models?: Array<{ name?: string; model?: string; context_length?: number }> }).models ?? [];
             const hit = loaded.find(m => m.name === model || m.model === model);

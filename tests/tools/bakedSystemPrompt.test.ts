@@ -154,6 +154,22 @@ describe("the probes measure the request that is actually sent", () => {
         expect(o.chats[0].messages.map(m => m.role)).toEqual(["user"]);
     });
 
+    it("probeClassifierLimits refuses redirects on its own requests", async () => {
+        const seen: Array<[string, RequestInit | undefined]> = [];
+        vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+            const u = String(input);
+            seen.push([u, init]);
+            if (u.endsWith("/api/show")) return new Response(JSON.stringify({ modelfile: "FROM /blob\n" }), { status: 200 });
+            if (u.endsWith("/api/chat")) return new Response(JSON.stringify({ prompt_eval_count: 13 }), { status: 200 });
+            if (u.endsWith("/api/ps")) return new Response(JSON.stringify({ models: [] }), { status: 200 });
+            return new Response("{}", { status: 404 });
+        }));
+        await probeClassifierLimits(URL_, "cls-redirect-1");
+        const probes = seen.filter(([u]) => /\/api\/(chat|ps)$/.test(u));
+        expect(probes.length).toBe(2);
+        for (const [u, init] of probes) expect(init?.redirect, u).toBe("error");
+    });
+
     it("probeClassifierLimits measures what callLayer1 sends", async () => {
         const o = ollama("system-field");
         vi.stubGlobal("fetch", o.fn);
