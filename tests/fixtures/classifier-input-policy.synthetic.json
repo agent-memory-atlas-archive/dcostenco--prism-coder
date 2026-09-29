@@ -1,0 +1,12 @@
+{
+    "schema": 1,
+    "evaluator": "classifier-input/1",
+    "classifier_input": {
+        "drop_sentence_words": ["lorem", "ipsum", "dolor", "sit", "amet", "consectetur", "adipiscing", "elit", "sed", "do"],
+        "require_each": [["lorem", "sed"], ["dolor", "amet"]],
+        "only_after": { "elit": ["amet"] },
+        "only_after_pattern": "^\\+\\+[a-z]+$",
+        "also_match": "^\\+\\+[a-z]*$",
+        "kept_needs_one_of": ["write", "spec", "function"]
+    }
+}

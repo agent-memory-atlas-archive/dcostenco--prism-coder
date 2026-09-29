@@ -53,8 +53,8 @@ import {
     passesCodingQualityGate,
 } from "../utils/codingQualityPolicy.js";
 import { checkInputSafety, checkOutputSafety } from "../utils/safetyGate.js";
-import { callLayer1 as defaultCallLayer1, classifyDeterministicLayer1, keywordBackstop, reservedCategory, MAX_CLASSIFIER_PROMPT_LENGTH, layer1ClassifierContent, secondReadExclusion, type Layer1Verdict, type SecondReadExclusionPolicy } from "../utils/layer1.js";
-import { getSecondReadPolicy, getAnswerCheckPolicy } from "../utils/inferencePolicy.js";
+import { callLayer1 as defaultCallLayer1, classifyDeterministicLayer1, keywordBackstop, reservedCategory, MAX_CLASSIFIER_PROMPT_LENGTH, layer1ClassifierContent, secondReadExclusion, type Layer1Verdict, type SecondReadExclusionPolicy, type ClassifierInputPolicy } from "../utils/layer1.js";
+import { getSecondReadPolicy, getAnswerCheckPolicy, getClassifierInputPolicy } from "../utils/inferencePolicy.js";
 import { pseudonymizeForCheck } from "../utils/pseudonymize.js";
 import { answerGroundingBytes, answerGroundingContent, parseGroundingVerdict, arithmeticSlips, arithmeticCorrection, ANSWER_GROUNDING_OUTPUT_TOKENS, ANSWER_GROUNDING_THINK, ANSWER_GROUNDING_THINK_TOKENS, ANSWER_GROUNDING_TIMEOUT_MS, ANSWER_GROUNDING_RETRY_TIMEOUT_MS, ANSWER_GROUNDING_FOLLOW_UP_TOKENS, type AnswerGroundingVerdict, type AnswerCheckPolicy } from "../utils/answerGrounding.js";
 import { recordInference, recordThinkOnlyRetry, formatInferenceMetrics, estimateTokens } from "../utils/inferenceMetrics.js";
@@ -316,6 +316,9 @@ function layer1HistoryCached(model: string, window: string): boolean {
     const hit = layer1HistoryCache.get(key);
     return hit !== undefined && hit.expiresAt > performance.now();
 }
+/** How long the screen waits for the classifier-input policy on its first load. */
+const CLASSIFIER_INPUT_LOAD_MS = 3_000;
+
 /** Tokens the classifier may generate (callLayer1's num_predict); they share
  *  the context with the request. */
 export const LAYER1_CLASSIFIER_OUTPUT_TOKENS = 16;
@@ -802,6 +805,11 @@ export const PRISM_INFER_TOOL: Tool = {
                     "Synalux deterministic route correction. 'local': skips that correction only.",
                 default: "auto",
             },
+            allow_parallel_calls: {
+                type: "boolean",
+                description: "Route: keep a reply of several calls only if every call is in allowed_tools.",
+                default: false,
+            },
             think: {
                 type: "boolean",
                 description:
@@ -811,10 +819,8 @@ export const PRISM_INFER_TOOL: Tool = {
             strict_entitlements: {
                 type: "boolean",
                 description:
-                    "Fail loud instead of running with ASSUMED free-tier limits: when entitlements " +
-                    "fell back to free because the portal was unreachable (source='fallback_free'), " +
-                    "throw instead of silently applying free clamps. Portal-confirmed free plans and " +
-                    "unconfigured machines are unaffected.",
+                    "Throw rather than apply assumed free limits when the portal was unreachable " +
+                    "(source='fallback_free'). Confirmed-free and unconfigured setups are unaffected.",
                 default: false,
             },
             escalation: {
@@ -876,6 +882,8 @@ export interface PrismInferArgs {
     /** auto = local contract + subscribed portal correction; local = skips that correction only
      *  (cloud inference fallback and the grounding verifier are separate switches). */
     route_guard?: "auto" | "local";
+    /** Route mode: accept a reply of several complete calls, each on allowed_tools. Default false. */
+    allow_parallel_calls?: boolean;
     /** Enable thinking (<think> blocks). Default: true for chat/code, false for route. */
     think?: boolean;
     /** Session key. Same id used by session_load_context / session_save_ledger.
@@ -954,6 +962,7 @@ export function isPrismInferArgs(args: unknown): args is PrismInferArgs {
         !["route", "chat", "code"].includes(a.mode as string)) return false;
     if (a.route_guard !== undefined &&
         !["auto", "local"].includes(a.route_guard as string)) return false;
+    if (a.allow_parallel_calls !== undefined && typeof a.allow_parallel_calls !== "boolean") return false;
     if (a.allowed_tools !== undefined) {
         if (!Array.isArray(a.allowed_tools) || a.allowed_tools.length > MAX_ROUTE_TOOLS) return false;
         if (!a.allowed_tools.every(isRouteToolName)) return false;
@@ -1994,7 +2003,7 @@ export interface InferDeps {
     /** Injectable classifier-limits lookup for the hedge second read; defaults to probeClassifierLimits. */
     probeClassifierLimits?: typeof probeClassifierLimits;
     /** Injectable Layer 1 classifier for testing. Defaults to callLayer1 from layer1.ts. */
-    callLayer1?: (userPrompt: string, ollamaUrl: string, model: string, fetchImpl?: typeof fetch, images?: string[], opts?: { deterministic?: boolean }) => Promise<Layer1Verdict>;
+    callLayer1?: (userPrompt: string, ollamaUrl: string, model: string, fetchImpl?: typeof fetch, images?: string[], opts?: { deterministic?: boolean; classifierInput?: ClassifierInputPolicy | null }) => Promise<Layer1Verdict>;
     /** Injectable local answer check for testing. Defaults to groundAnswer (the 9b on this device). */
     groundAnswer?: (o: Parameters<typeof groundAnswer>[0]) => Promise<{ verdict: AnswerGroundingVerdict; reply?: string; ms?: number }>;
     /** Injectable runtime-context lookup for the local check. Defaults to probeLoadedContext (/api/ps). */
@@ -2003,6 +2012,8 @@ export interface InferDeps {
     answerCheckPolicy?: () => Promise<AnswerCheckPolicy | null>;
     /** Injectable second-read exclusion policy for testing. Defaults to getSecondReadPolicy. */
     secondReadPolicy?: () => Promise<SecondReadExclusionPolicy | null>;
+    /** Injectable classifier-input policy for testing. Defaults to getClassifierInputPolicy. */
+    classifierInputPolicy?: () => Promise<ClassifierInputPolicy | null>;
     /** Injectable Synalux confirmation of a local pass (pseudonymized). Defaults to callSynaluxAnswerCheck. */
     checkAnswer?: (o: { messages: readonly InferHistoryTurn[]; prompt: string; answer: string }) => Promise<{ verdict: AnswerCheckVerdict; policy_version?: string; reason?: string }>;
 }
@@ -2144,6 +2155,7 @@ export async function runInfer(args: PrismInferArgs, deps: InferDeps): Promise<P
     }
 
     const mode = args.mode ?? "route";
+    const gateOptions = { allowParallelCalls: mode === "route" && args.allow_parallel_calls === true };
     // Model choice belongs here—not in session_task_route—because this layer
     // owns every viability input and the explicit caller override contract.
     const requestedCeiling = resolveRequestedModelCeiling(args);
@@ -2438,10 +2450,15 @@ export async function runInfer(args: PrismInferArgs, deps: InferDeps): Promise<P
         // kept: reserved and uncertain fail closed for text, error follows
         // the single-prompt error path), then each turn and the prompt in
         // context (raise only) — see below.
+        // The account's classifier-input policy; without one the classifier
+        // reads the prompt as written.
+        const classifierInput = await (deps.classifierInputPolicy ?? (() => getClassifierInputPolicy({ deadlineMs: CLASSIFIER_INPUT_LOAD_MS })))().catch(() => null);
         let l1: Layer1Verdict;
         if (!args.messages?.length) {
-            // Single turn: the exact call it always was.
-            l1 = await l1fn(args.prompt, deps.ollamaUrl, l1Model, undefined, resolvedImages);
+            // Single turn: one call; the classifier-input policy is passed when there is one.
+            l1 = classifierInput
+                ? await l1fn(args.prompt, deps.ollamaUrl, l1Model, undefined, resolvedImages, { classifierInput })
+                : await l1fn(args.prompt, deps.ollamaUrl, l1Model, undefined, resolvedImages);
             if (l1 !== "OBVIOUS_NOT_RESERVED") l1Layer = "prompt";
         } else {
             l1 = "OBVIOUS_NOT_RESERVED";
@@ -2523,7 +2540,7 @@ export async function runInfer(args: PrismInferArgs, deps: InferDeps): Promise<P
             // (review round 19: skipping it there bypassed that floor).
             const promptFastPath = promptRoutine && args.prompt.length <= MAX_CLASSIFIER_PROMPT_LENGTH && (resolvedImages?.length ?? 0) === 0;
             if (l1 !== "OBVIOUS_RESERVED" && !promptFastPath) {
-                l1 = raise(l1, await l1fn(args.prompt, deps.ollamaUrl, l1Model, undefined, resolvedImages, { deterministic: false }), "prompt");
+                l1 = raise(l1, await l1fn(args.prompt, deps.ollamaUrl, l1Model, undefined, resolvedImages, { deterministic: false, ...(classifierInput ? { classifierInput } : {}) }), "prompt");
             }
             // 3. Context, raise only: one window per turn and one for the
             // prompt (see contextWindows), cached like any window. Skipped
@@ -3124,7 +3141,7 @@ export async function runInfer(args: PrismInferArgs, deps: InferDeps): Promise<P
                 let output = stripped;
 
                 // Quality gate — all modes. Route uses mode-aware empty floor (length===0).
-                let gate = passesQualityGate(output, thinkOnly, result.doneReason, mode);
+                let gate = passesQualityGate(output, thinkOnly, result.doneReason, mode, gateOptions);
                 if (gate.pass && mode === "code") {
                     gate = passesCodingQualityGate(args.prompt, output);
                 }
@@ -3167,7 +3184,7 @@ export async function runInfer(args: PrismInferArgs, deps: InferDeps): Promise<P
                     if (retried.ok) {
                         const retriedStrip = stripThink(retried.text);
                         const retriedGate = passesQualityGate(
-                            retriedStrip.stripped, retriedStrip.thinkOnly, retried.doneReason, mode,
+                            retriedStrip.stripped, retriedStrip.thinkOnly, retried.doneReason, mode, gateOptions,
                         );
                         // Keep the retry only if it is actually better — a retry that
                         // truncates too must not overwrite the original with a
@@ -3207,7 +3224,7 @@ export async function runInfer(args: PrismInferArgs, deps: InferDeps): Promise<P
                     );
                     if (deterministicRepair.changes.length > 0) {
                         output = deterministicRepair.output;
-                        gate = passesQualityGate(output, false, result.doneReason, mode);
+                        gate = passesQualityGate(output, false, result.doneReason, mode, gateOptions);
                         if (gate.pass) {
                             gate = passesCodingQualityGate(args.prompt, output);
                         }
@@ -3496,6 +3513,7 @@ async function applyVerification(
     const mode = args.mode ?? "route";
     if (mode === "route") {
         const allowedTools = new Set(args.allowed_tools ?? DEFAULT_PRISM_ROUTE_TOOLS);
+        const contractOptions = { allowParallel: args.allow_parallel_calls === true };
         const parsed = parseRouteOutput(draft);
         const shouldUsePortal =
             args.route_guard !== "local" &&
@@ -3522,7 +3540,7 @@ async function applyVerification(
                     args.prompt,
                 );
                 if (!portalOutcome) {
-                    const localCheck = applyLocalRouteContract(draft, allowedTools);
+                    const localCheck = applyLocalRouteContract(draft, allowedTools, contractOptions);
                     routeGuard = {
                         ...localCheck,
                         source: "local_fallback",
@@ -3542,7 +3560,7 @@ async function applyVerification(
                     routeGuard = portalOutcome;
                 }
             } catch (error) {
-                const localFallback = applyLocalRouteContract(draft, allowedTools);
+                const localFallback = applyLocalRouteContract(draft, allowedTools, contractOptions);
                 routeGuard = {
                     ...localFallback,
                     source: "local_fallback",
@@ -3562,7 +3580,7 @@ async function applyVerification(
                 }
             }
         } else {
-            routeGuard = applyLocalRouteContract(draft, allowedTools);
+            routeGuard = applyLocalRouteContract(draft, allowedTools, contractOptions);
         }
         routedDraft = routeGuard.output;
     }

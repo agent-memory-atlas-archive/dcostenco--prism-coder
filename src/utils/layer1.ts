@@ -77,6 +77,74 @@ export function layer1ClassifierContent(input: string): string {
     return LAYER1_PROMPT.replace("{prompt}", () => input);
 }
 
+/** The classifier-input policy, served by Synalux and pinned by hash
+ *  (inferencePolicy.ts loads it). */
+export interface ClassifierInputPolicy {
+    /** A sentence can be left out of the classifier's copy only if every word is listed here. */
+    dropWords: ReadonlySet<string>;
+    /** ...and it has at least one word from each of these groups. */
+    requireEach: ReadonlyArray<ReadonlySet<string>>;
+    /** A listed word here counts only right after one of its words, or after a token matching onlyAfterPattern. */
+    onlyAfter: ReadonlyMap<string, ReadonlySet<string>>;
+    onlyAfterPattern: RegExp | null;
+    /** Tokens that count as listed words, but never satisfy a group. */
+    alsoMatch: RegExp | null;
+    /** Nothing is left out unless a sentence that stays has one of these words. */
+    keptNeedsOneOf: ReadonlySet<string>;
+}
+
+/** Question marks in the scripts prism serves: a sentence with one is never left out. */
+const QUESTION_MARK = new RegExp("[?" + String.fromCharCode(0xff1f, 0xfe56, 0x061f, 0x037e, 0x00bf, 0x203d, 0x2047, 0x2048, 0x2049, 0x2e2e, 0x055e, 0x1367) + "]");
+
+function words(sentence: string): string[] {
+    return sentence.toLowerCase().split(/[\s,;:()]+/).map((w) => w.replace(TOKEN_EDGE, "")).filter(Boolean);
+}
+
+const TOKEN_EDGE = /^[^\w`'#.+-]+|[^\w`'#+-]+$/g;
+
+function droppable(sentence: string, p: ClassifierInputPolicy): boolean {
+    // A sentence with a question mark is never left out: it may be what the request asks.
+    if (QUESTION_MARK.test(sentence)) return false;
+    const hit = p.requireEach.map(() => false);
+    let prev: string | null = null;
+    for (const token of words(sentence)) {
+        const pattern = !!p.alsoMatch?.test(token);
+        if (p.dropWords.has(token)) {
+            const after = p.onlyAfter.get(token);
+            if (after && !(prev !== null && (after.has(prev) || !!p.onlyAfterPattern?.test(prev)))) return false;
+            p.requireEach.forEach((group, i) => { if (group.has(token)) hit[i] = true; });
+        } else if (!pattern) {
+            return false;
+        }
+        prev = token;
+    }
+    return hit.length > 0 && hit.every(Boolean);
+}
+
+/**
+ * The classifier's copy of a request under a classifier-input policy. A
+ * sentence the policy allows is left out with one adjacent separator; every
+ * other character is kept, and text with nothing to leave out is returned as it is.
+ */
+export function classifierCopy(text: string, p: ClassifierInputPolicy): string {
+    // Even indexes are sentences, odd indexes the separators between them.
+    const parts = text.split(/((?<=[.!?])[^\S\r\n]+|[\r\n]+)/);
+    const keep = parts.map(() => true);
+    let dropped = false;
+    for (let i = 0; i < parts.length; i += 2) {
+        if (!droppable(parts[i], p)) continue;
+        keep[i] = false;
+        dropped = true;
+        if (i > 0 && keep[i - 1]) keep[i - 1] = false;
+        else if (i + 1 < parts.length) keep[i + 1] = false;
+    }
+    if (!dropped) return text;
+    // The sentences that stay must still say what is asked; otherwise the classifier reads it all.
+    if (!parts.some((part, i) => i % 2 === 0 && keep[i] && words(part).some((w) => p.keptNeedsOneOf.has(w)))) return text;
+    const out = parts.filter((_, i) => keep[i]).join("");
+    return out.trim() ? out : text;
+}
+
 const VALID: ReadonlySet<string> = new Set([
     "OBVIOUS_RESERVED",
     "OBVIOUS_NOT_RESERVED",
@@ -522,6 +590,11 @@ export async function callLayer1(
          *  (see prismInferHandler's history screen). The oversize keyword
          *  floor below is NOT gated by this and still runs. */
         deterministic?: boolean;
+        /** The account's classifier-input policy, when it has one. Only the
+         *  classifier's copy follows it; the deterministic floor and the
+         *  keyword backstop read the full request, and a request with images
+         *  is classified as written. */
+        classifierInput?: ClassifierInputPolicy | null;
     },
 ): Promise<Layer1Verdict> {
     if (!userPrompt || !userPrompt.trim()) return "ERROR";
@@ -543,7 +616,8 @@ export async function callLayer1(
         // short-circuits to reserved handling.
         return "OBVIOUS_RESERVED";
     }
-    const classifierInput = oversize ? buildOversizeExcerpt(userPrompt) : userPrompt;
+    const excerpt = oversize ? buildOversizeExcerpt(userPrompt) : userPrompt;
+    const classifierInput = opts?.classifierInput && !hasImages ? classifierCopy(excerpt, opts.classifierInput) : excerpt;
 
     // A SYSTEM baked into the classifier model's Modelfile must not sit in front
     // of LAYER1_PROMPT. prism-coder:4b bakes a tool-routing prompt; with it the
