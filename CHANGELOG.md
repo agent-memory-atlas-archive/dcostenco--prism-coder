@@ -2,6 +2,38 @@
 
 All notable changes to this project will be documented in this file.
 
+## 20.21.20 — 2026-10-08
+
+### A refused ledger save no longer silences the drift reminder
+
+The hourly reminder to save the ledger and check for drift restarted its timer
+after every `session_save_ledger` reply, including a save refused with
+`context_not_loaded` and the greeting-only reply that writes nothing. Nothing
+was saved, yet the reminder went quiet for another hour. A ledger save now
+restarts the timer only when it writes an entry; `session_detect_drift`
+restarts it as before.
+
+### A saved ledger entry asks for the handoff too
+
+The reply to a written ledger entry now ends with: "If this checkpoint ends a
+unit of work, also save the handoff with session_save_handoff." The ledger
+records what happened, and the next session starts from the handoff. A refused
+save and the greeting-only reply do not ask.
+
+### A duplicate ledger save no longer reads as saved
+
+The local store skips an entry identical to one saved for the same project and
+conversation in the last 5 minutes. The reply still said "✅ Session ledger
+saved" and restarted the drift timer. It now says that nothing new was written,
+and leaves the timer alone.
+
+### A handoff the cloud store failed to save is reported as an error
+
+With Supabase storage, a failed `save_handoff_with_version` call was caught
+and returned as "updated", so the agent was told "✅ Handoff updated" and the
+next session found the old handoff. The failure is now returned as an error
+naming the project, and the agent can retry.
+
 ## 20.21.19 — 2026-10-03
 
 ### Prism Browser can test phone and tablet layouts

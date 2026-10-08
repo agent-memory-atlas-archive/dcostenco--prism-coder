@@ -158,6 +158,18 @@ or by re-enabling after each run.
 <details>
 <summary>Release history (optional)</summary>
 
+## What's New in v20.21.20
+
+- Fixed: a `session_save_ledger` call refused with `context_not_loaded`, or the
+  greeting-only reply that writes nothing, restarted the hourly drift reminder.
+  A ledger save restarts it now only when it writes an entry.
+- A written ledger entry's reply also asks for the handoff when the checkpoint
+  ends a unit of work.
+- A ledger save skipped as a duplicate of one saved in the last 5 minutes now
+  says nothing new was written, instead of "saved".
+- Fixed: with Supabase storage, a handoff whose save failed was reported as
+  updated. It is now an error the agent can see and retry.
+
 ## What's New in v20.21.19
 
 - Prism Browser emulates phones and tablets. `--device iphone-17`, or one of

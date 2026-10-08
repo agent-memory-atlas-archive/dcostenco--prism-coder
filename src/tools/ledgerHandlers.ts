@@ -928,6 +928,22 @@ export async function sessionSaveLedgerHandler(args: unknown) {
     role: effectiveRole,  // v3.0: Hivemind role scoping (dashboard fallback)
   });
 
+  // SQLite skips an identical (project, conversation_id, summary) saved in the
+  // last 5 minutes and returns { id, deduplicated: true } without writing.
+  // Nothing new was saved, so this is not a drift checkpoint and must not read
+  // as one: no timer reset, no "saved" line, no handoff nudge, and no second
+  // embedding or auto-link pass over the existing row.
+  if ((result as { deduplicated?: boolean } | null | undefined)?.deduplicated === true) {
+    return {
+      content: [{
+        type: "text",
+        text: (_saveLedgerGateWarning ? `⚠️ ${_saveLedgerGateWarning}\n\n` : "") +
+          `ℹ️ An identical ledger entry for project "${project}" was already saved in the last 5 minutes; nothing new was written.` +
+          resolverNote,
+      }],
+      isError: false,
+    };
+  }
 
   // ─── Fire-and-forget embedding generation ───
   let embeddingQueued = false;
@@ -1041,6 +1057,15 @@ export async function sessionSaveLedgerHandler(args: unknown) {
 
   const metricsBlock = formatInferenceMetrics();
 
+  // GATE 5: a ledger entry that was WRITTEN is a drift checkpoint. Reset the
+  // timer here, on the write path only. It used to be reset by the server
+  // after every returned result, so a context_not_loaded refusal or the
+  // greeting-only skip silenced the hourly reminder without saving anything.
+  {
+    const { noteDriftCheck } = await import("../session/sessionContext.js");
+    noteDriftCheck(conversation_id);
+  }
+
   return {
     content: [{
       type: "text",
@@ -1053,6 +1078,9 @@ export async function sessionSaveLedgerHandler(args: unknown) {
         (embeddingQueued
           ? `📊 Embedding generation queued for semantic search.`
           : `📊 Primary history saved; optional semantic indexing was not queued.`) +
+        // The ledger logs what happened; the next session starts from the
+        // handoff. Only a written entry asks, never the skip or a refusal.
+        `\n💾 If this checkpoint ends a unit of work, also save the handoff with session_save_handoff.` +
         metricsBlock +
         resolverNote,
     }],
